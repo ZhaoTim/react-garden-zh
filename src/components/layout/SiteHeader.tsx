@@ -14,9 +14,9 @@ import { GithubButton } from "./GithubButton";
 import { ThemeToggle } from "./ThemeToggle";
 
 const nav = [
-  { to: "/posts", label: "Posts" },
-  { to: "/tags", label: "Tags" },
-  { to: "/graph", label: "Graph" },
+  { to: "/posts", label: "文章" },
+  { to: "/tags", label: "标签" },
+  { to: "/graph", label: "知识图谱" },
 ] as const;
 
 /** The site mark: three linked nodes, the accent one "active". */
@@ -82,7 +82,7 @@ export function SiteHeader() {
             href="#main"
             className="sr-only focus:not-sr-only focus:absolute focus:top-3 focus:left-3 focus:z-50 focus:rounded-full focus:bg-fg focus:px-4 focus:py-2 focus:text-sm focus:text-bg"
           >
-            Skip to main content
+            跳转到主要内容
           </a>
           <Link
             tabIndex={0}
@@ -352,7 +352,7 @@ function LessonsMenu({ paletteOpen }: { paletteOpen: boolean }) {
             className="absolute inset-0 rounded-full bg-sunken"
           />
         )}
-        <span className="relative">Lessons</span>
+        <span className="relative">专栏教程</span>
         {active && <span className="sr-only"> (current section)</span>}
         <motion.span
           className="relative inline-flex text-subtle"

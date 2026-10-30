@@ -51,8 +51,8 @@ function Home() {
 
       {featured.length > 0 && (
         <section aria-labelledby="series-title" className="container-page mt-4 sm:mt-8">
-          <SectionHeading id="series-title" eyebrow="Courses">
-            Series
+          <SectionHeading id="series-title" eyebrow="专栏课程">
+            精选专栏
           </SectionHeading>
           <Reveal className="mt-6 grid gap-6" delay={0.1}>
             {featured.map(({ folder, parts }, i) => (
@@ -66,14 +66,14 @@ function Home() {
 
       <section aria-labelledby="recent-title" className="container-page mt-20">
         <div className="flex items-end justify-between gap-4">
-          <SectionHeading id="recent-title" eyebrow="Latest">
-            Recent notes
+          <SectionHeading id="recent-title" eyebrow="最新发布">
+            近期笔记与文章
           </SectionHeading>
           <Link
             to="/posts"
             className="group inline-flex shrink-0 items-center gap-1.5 text-sm font-medium text-muted hover:text-fg"
           >
-            All {recent.total} posts
+            全部 {recent.total} 篇文章
             <ArrowRight size={15} className="transition-transform group-hover:translate-x-0.5" />
           </Link>
         </div>
@@ -84,15 +84,15 @@ function Home() {
             className="mt-6 md:grid-cols-2"
           />
         ) : (
-          <EmptyState className="mt-6" title="Nothing published yet">
-            Notes appear here as soon as they are synced from the vault.
+          <EmptyState className="mt-6" title="暂无已发布文章">
+            文章发布后将在此处呈现。
           </EmptyState>
         )}
       </section>
 
       <section aria-labelledby="topics-title" className="container-page mt-20">
-        <SectionHeading id="topics-title" eyebrow="Explore">
-          Topics
+        <SectionHeading id="topics-title" eyebrow="探索分类">
+          热门主题
         </SectionHeading>
         <div className="mt-6">
           <Await promise={tags} fallback={<TagCloudSkeleton />}>
@@ -121,23 +121,23 @@ function Hero() {
         className={`mt-6 max-w-[18ch] font-serif text-[2.75rem] leading-[1.04] font-medium tracking-[-0.025em] text-balance sm:text-6xl lg:text-7xl enter`}
         style={{ "--i": 1 } as React.CSSProperties}
       >
-        Notes that go <em className="font-normal text-accent italic">all the way</em> down.
+        直击本质、探寻到底的 <em className="font-normal text-accent italic">React 深度笔记</em>。
       </h1>
       <p
         className={`mt-6 max-w-[56ch] text-lg leading-relaxed text-pretty text-muted sm:text-xl enter`}
         style={{ "--i": 2 } as React.CSSProperties}
       >
-        {site.description} Diagrams, footnotes and the occasional rabbit hole.
+        {site.description} 包含精美架构流程图、代码图解与源码级全流程推导。
       </p>
       <div
         className={`mt-8 flex flex-wrap gap-3 enter`}
         style={{ "--i": 3 } as React.CSSProperties}
       >
         <Link to="/posts" className={buttonStyles.primary}>
-          Browse notes <ArrowRight size={15} />
+          浏览全部文章 <ArrowRight size={15} />
         </Link>
         <button type="button" onClick={() => palette.open()} className={buttonStyles.secondary}>
-          <SearchIcon size={15} /> Search
+          <SearchIcon size={15} /> 搜索
           <Kbd className="ml-1 max-sm:hidden">/</Kbd>
         </button>
       </div>

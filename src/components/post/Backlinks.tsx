@@ -13,7 +13,7 @@ export function Backlinks({ posts, className }: { posts: PostMeta[]; className?:
         id="backlinks-title"
         className="flex items-center gap-2 text-xs font-semibold tracking-[0.08em] text-subtle uppercase"
       >
-        <LinkIcon size={14} /> Linked from {posts.length} {posts.length === 1 ? "note" : "notes"}
+        <LinkIcon size={14} /> 被 {posts.length} 篇笔记引用
       </h2>
       <Reveal as="ul" className="mt-4 grid gap-2.5 sm:grid-cols-2">
         {posts.map((p, i) => (
@@ -29,7 +29,7 @@ export function Backlinks({ posts, className }: { posts: PostMeta[]; className?:
 export function RelatedPosts({
   posts,
   className,
-  title = "Keep reading",
+  title = "推荐阅读",
 }: {
   posts: PostMeta[];
   className?: string;

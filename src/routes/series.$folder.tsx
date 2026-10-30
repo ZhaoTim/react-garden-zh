@@ -68,15 +68,15 @@ export const Route = createFileRoute("/series/$folder")({
           parts,
         }),
         breadcrumbNode(origin, path, [
-          { name: "Home", path: "/" },
-          { name: "Lessons", path: "/lessons" },
+          { name: "首页", path: "/" },
+          { name: "专栏教程", path: "/lessons" },
           { name: folder.title, path },
         ]),
       ],
     });
   },
   pendingComponent: PageSkeleton,
-  notFoundComponent: () => <NotFound title="No such series" />,
+  notFoundComponent: () => <NotFound title="未找到对应专栏" />,
   component: SeriesPage,
 });
 
@@ -102,12 +102,12 @@ function SeriesPage() {
               className="group inline-flex items-center gap-1.5 text-sm font-medium text-muted hover:text-fg"
             >
               <ArrowLeft size={14} className="transition-transform group-hover:-translate-x-0.5" />{" "}
-              All posts
+              全部文章
             </Link>
           </div>
           <p {...enter(1)}>
             <span className="mt-6 inline-flex items-center gap-2 text-xs font-semibold tracking-[0.1em] text-accent-strong uppercase">
-              <Layers size={14} /> Series
+              <Layers size={14} /> 专栏课程
             </span>
           </p>
           <h1
@@ -127,14 +127,10 @@ function SeriesPage() {
           )}
           <div {...enter(4)}>
             <dl className="mt-7 grid grid-cols-3 divide-x divide-line rounded-2xl border border-line bg-surface text-center">
-              <Stat label="Parts" icon={<Layers size={14} />} value={String(parts.length)} />
+              <Stat label="篇数" icon={<Layers size={14} />} value={String(parts.length)} />
+              <Stat label="阅读时长" icon={<Clock size={14} />} value={formatDuration(minutes)} />
               <Stat
-                label="Reading time"
-                icon={<Clock size={14} />}
-                value={formatDuration(minutes)}
-              />
-              <Stat
-                label="Updated"
+                label="最近更新"
                 icon={<Calendar size={14} />}
                 value={<time dateTime={isoDate(folder.latest)}>{formatDate(folder.latest)}</time>}
               />
@@ -146,10 +142,10 @@ function SeriesPage() {
                   params={{ _splat: first.slug }}
                   className={buttonStyles.primary}
                 >
-                  Start reading <ArrowRight size={15} />
+                  开始阅读 <ArrowRight size={15} />
                 </Link>
                 <span className="text-sm text-muted">
-                  Begins with <span className="text-fg">{first.title}</span>
+                  首发章节：<span className="text-fg">{first.title}</span>
                 </span>
               </div>
             )}
@@ -158,10 +154,7 @@ function SeriesPage() {
       </section>
 
       {folder.indexSlug && (
-        <section
-          className="container-prose mt-14 border-t border-line pt-12"
-          aria-label="Introduction"
-        >
+        <section className="container-prose mt-14 border-t border-line pt-12" aria-label="专栏导读">
           <Suspense fallback={<Skeleton className="h-40 w-full" />}>
             <PostBody slug={folder.indexSlug} />
           </Suspense>
@@ -171,7 +164,7 @@ function SeriesPage() {
       <section className="container-prose mt-16" aria-labelledby="parts-title">
         <div className="flex items-baseline justify-between">
           <h2 id="parts-title" className="font-serif text-3xl font-medium tracking-tight">
-            The parts
+            章节目录
           </h2>
           <span className="text-sm text-muted">{plural(parts.length, "part")}</span>
         </div>

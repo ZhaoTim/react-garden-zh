@@ -1,74 +1,74 @@
 ---
-description: What React does once a render is finished, in what order DOM changes, refs and effects happen, and how to choose between useLayoutEffect and useEffect.
+description: 剖析 React 在渲染结束后的完整流转：DOM 变更、Refs 与 Effects 的严格执行时序，以及如何在 useLayoutEffect 与 useEffect 之间做出明智抉择。
 tags: [react, react-concepts, commit-phase, effects]
 react-version: 19.3.1
 created: 2026-10-25T12:08:45.079Z
 ---
 
-# The Commit Phase and Effects
+# Commit 阶段与副作用（The Commit Phase and Effects）
 
-> [!summary] TL;DR
-> Once a render is finished, React commits it in one synchronous block that can't be interrupted: it changes the DOM, swaps the finished tree in as current, then runs layout effects and attaches refs, all before the browser can paint. `useEffect` runs later, usually after paint, except after a discrete update like a click, when React runs it at the end of the commit. Cleanups always run before the next setups.
+> [!summary] 核心速览（TL;DR）
+> 一旦渲染（Render）阶段完成，React 就会在一个**不可中断的单一同步代码块**中执行提交（Commit）：它依次修改真实 DOM、将构建好的新树切换为当前树（current），随后在浏览器绘制屏幕之前，同步执行布局副作用（`useLayoutEffect`）并绑定 refs。而 `useEffect` 声明的被动副作用通常会在稍后、即浏览器完成像素绘制之后异步执行；但在点击等离散交互更新之后，React 会在 Commit 阶段末尾立即同步清空它们。此外，所有的清理函数（Cleanups）都严格在新一轮挂载函数（Setups）之前执行。
 
-You check off "Milk" in the shopping list. The render from the earlier parts produced a finished work-in-progress tree, full of flags that say what to change. Nothing on screen has moved yet. Your `Header` wants to put the remaining count in `document.title`, and an `Item` wants to measure its own height to animate the strike-through.
+你在购物清单里勾选了“牛奶”（Milk）。在前几篇介绍的渲染流程之后，React 在内存中生成了一棵构建完毕的正在工作树（Work-in-progress 树），上面打满了标记各项变更的副作用标记（Flags）。此时，屏幕上的像素还纹丝未动。与此同时，你的 `Header` 组件希望把剩余待办数量同步更新到 `document.title` 中，而某个 `Item` 组件则想测量自身的 DOM 高度以呈现划线删除动画。
 
-Which of those runs first? Can the measurement see the new DOM? Will the user ever see a half-updated list? This part answers that by walking through the **commit**, the phase where React applies a render to the screen.
+这些操作究竟谁先执行？高度测量能否拿到最新的 DOM 节点？用户有没有可能在屏幕上瞥见只更新了一半的残缺列表？本篇将深入 **Commit 阶段（提交阶段）**——也就是 React 将内存中的渲染结果真正应用到屏幕上的关键阶段，逐一解开这些疑问。
 
-## Commit is one uninterruptible block
+## Commit 是一个不可中断的同步执行块
 
-The render phase can be paused, discarded and restarted ([[06 Fiber - Work You Can Pause|Fiber]]). The commit can't. Once React starts committing, it runs from the first DOM change to the last layout effect without yielding.
+渲染阶段（Render phase）可以暂停、废弃并重新开始（详见 [[06 Fiber - Work You Can Pause|第 06 篇 · Fiber：可被中断与恢复的工作单元]]）。但 Commit 阶段绝不能这么做。一旦 React 迈入 Commit 阶段，它就会一口气从第一个 DOM 变更一直同步执行到最后一个布局副作用，全程绝不出让主线程控制权。
 
-That's deliberate. If React stopped halfway through changing the DOM, the browser could paint a screen where some items are updated and others aren't. Doing all the DOM work in one synchronous block means the user only ever sees the old screen or the new one.
+这一设计深思熟虑。倘若 React 在修改 DOM 的中途停顿出让，浏览器就可能在这一瞬间完成绘制，导致用户在屏幕上看到“一部分元素已经更新、另一部分却还是旧数据”的撕裂残缺画面。将所有 DOM 操作集中在单一同步执行块中完成，确保了用户眼中要么是完整的旧界面，要么是完整的新界面，绝无中间状态。
 
-It also means a commit has a fixed order, in sub-phases, and you can rely on it.
+这也意味着 Commit 阶段有着高度固定且值得信赖的**子阶段执行顺序（Sub-phases）**：
 
 ```mermaid
 flowchart TD
-  A["Flush leftover effects<br/>from the last commit"] --> B["Before mutation:<br/>read old DOM"]
-  B --> C["Mutation:<br/>delete, insert, update DOM<br/>detach refs"]
-  C --> D["Swap: finished tree<br/>becomes current"]
-  D --> E["Layout:<br/>useLayoutEffect, attach refs"]
-  E --> P["Browser paints"]
-  E -.->|"after a click"| F["Passive: useEffect"]
-  P -.->|"otherwise, usually"| F
+  A["清理上一轮残余副作用<br/>（Flush leftover effects）"] --> B["Before Mutation 阶段：<br/>读取旧 DOM 快照"]
+  B --> C["Mutation 阶段（DOM 变更）：<br/>删除、插入、更新真实 DOM<br/>解绑旧 refs"]
+  C --> D["双缓冲指针切换（Swap）：<br/>Finished 树正式切换为 Current 树"]
+  D --> E["Layout 阶段（布局副作用）：<br/>执行 useLayoutEffect、挂载新 refs"]
+  E --> P["浏览器像素绘制<br/>（Browser paints）"]
+  E -.->|"点击等离散交互后"| F["Passive 阶段：<br/>异步执行 useEffect"]
+  P -.->|"其他常规场景下"| F
 ```
 
-## Step 0: finish the previous commit's effects
+## 步骤 0：清空上一轮提交遗留的副作用
 
-Before applying a new tree, React first runs any `useEffect` work from the previous commit that hasn't run yet. The rule is simple: effects of commit N always run before commit N+1 changes the DOM. So an effect never wakes up to a screen that is two updates ahead of it.
+在将全新 Fiber 树真正应用到界面之前，React 必须首先把上一轮提交中尚未执行完毕的任何 `useEffect` 任务全部冲刷（Flush）执行掉。这里的规则极其纯粹：**第 N 次提交的 Effects 必须严格在第 N+1 次提交修改真实 DOM 之前执行完毕**。如此一来，任何副作用被唤醒时，绝不会面对一个“已经跨越了两个更新周期、物是人非”的超前 DOM 环境。
 
-## Before mutation: last look at the old DOM
+## Before Mutation 阶段：对旧 DOM 的最后凝视
 
-This short phase reads the DOM as it is now, before anything changes. React saves which element has focus and what text is selected, so it can restore them afterwards. It also temporarily disables its event system, so DOM changes that fire events synchronously (such as a `blur` when a focused node is removed) can't re-enter React in the middle of the commit.
+这个短暂的子阶段会在任何 DOM 真正变更之前，对当前的 DOM 状态进行最后一次读取。React 会记录当前哪个元素拥有焦点（Focus），以及用户选中了哪段文本（Selection），以便在后续变更完成后精准恢复。同时，React 会在此处临时禁用内部事件系统——防止某些能够同步触发事件的 DOM 操作（比如移除一个带有焦点的输入框所同步触发的 `blur` 事件）在 Commit 阶段中途重入并打乱 React 的执行节奏。
 
-For class components, this is where `getSnapshotBeforeUpdate` runs, which is the last chance to read something like a scroll position before a list grows.
+对于类组件而言，著名的生命周期钩子 `getSnapshotBeforeUpdate` 正是在这个阶段触发的，这是在列表插入新节点导致高度激增前读取真实滚动位置的最后机会。
 
-## Mutation: change the DOM
+## Mutation 阶段：真正变更真实 DOM
 
-Now React applies the flags from reconciliation ([[05 Reconciliation - Finding What Changed|Reconciliation]]):
+此时，React 开始大刀阔斧地将协调阶段计算得出的副作用标记（Flags，详见 [[05 Reconciliation - Finding What Changed|第 05 篇 · 协调（Reconciliation）：探寻真正变化的部分]]）应用到真实 DOM 上：
 
-- **Deletions**: for removed components, React runs their layout-effect cleanups and detaches their refs (calls the ref with `null`, or runs the ref's cleanup function). Then it removes the topmost DOM node of the deleted subtree with one operation. Descendants leave with it.
-- **Insertions and moves**: new or moved fibers get their DOM nodes inserted at the right position. A newly mounted subtree was built off-screen, so it goes in with one insertion at its top.
-- **Updates**: changed attributes and text are written onto existing DOM nodes.
+- **删除节点（Deletions）**：对于被卸载的组件，React 会同步执行其布局副作用清理函数（Layout-effect cleanups）并解绑 refs（为 ref 传入 `null`，或调用 React 19 的 ref 清理函数）。随后，React 会一次性将该被删子树的最顶层 DOM 节点从文档中移除，其下所有的子孙 DOM 节点随之整体脱离。
+- **插入与移动节点（Insertions and moves）**：新增或发生位置调整的 Fiber 节点，其对应的 DOM 节点会被插入到正确的目标位置。由于全新挂载的子树早在内存离屏状态下就构建完成了，React 仅需在子树顶层执行一次插入操作即可完整嵌入。
+- **属性更新（Updates）**：发生变更的 DOM 属性（Attributes）和文本内容（Text）会被写入现有的 DOM 节点。
 
-Two kinds of effect code also run here:
+在这个阶段，还会伴随执行两类特殊的副作用逻辑：
 
-- **`useInsertionEffect`** runs its cleanup and setup during mutation, before any layout effect. It exists for CSS-in-JS libraries that must inject `<style>` tags before anything measures the page. You will rarely write one yourself.
-- **`useLayoutEffect` cleanups** for components whose layout effects are about to re-run.
+- **`useInsertionEffect`**：其清理函数与挂载函数（Setup）均在 Mutation 阶段同步执行，早于任何布局副作用。它专为 CSS-in-JS 库（如 Styled-components、Emotion）量身设计，确保在任何代码尝试测量页面尺寸之前，将必要的 `<style>` 样式规则精准注入 DOM。在日常业务开发中你几乎用不到它。
+- **`useLayoutEffect` 清理函数**：即将重新执行布局副作用的组件，其上一轮遗留的清理函数会在此刻率先被同步调用。
 
-At the end of mutation, React restores focus and selection and re-enables events.
+在 Mutation 阶段的末尾，React 会恢复先前保存的焦点和选区状态，并重新启用事件系统。
 
-## The swap
+## 双缓冲树指针切换（The Swap）
 
-Right after mutation, React points the root at the finished tree. The work-in-progress tree is now **current**, and the old one becomes scratch space for the next render.
+紧随 Mutation 阶段之后，React 会将根节点的指针直接指向这棵刚刚构建完毕的 Fiber 树。此时，**正在工作树（Work-in-progress 树）正式蜕变升级为当前树（Current tree）**，而先前的旧树则降级为备用缓存空间，供下一次渲染时复用。
 
-The timing is exact on purpose. Code that runs during mutation, such as cleanups for things being removed, sees the old tree as current. Code that runs in the next phase sees the new one.
+这个指针切换的时序至关重要且精密考究：在 Mutation 阶段运行的代码（例如正在被移除组件的清理逻辑）所看到的当前树依然是旧树；而即将步入下一阶段执行的代码，所看到的就已经是全新的 Current 树了。
 
-## Layout: the DOM is ready, the screen isn't
+## Layout 阶段：DOM 结构已就绪，屏幕像素尚未绘制
 
-Now React runs `useLayoutEffect` setups and attaches refs (`ref.current = node`, or calls your ref callback). Class components get `componentDidMount` and `componentDidUpdate` here.
+此时，React 开始执行 `useLayoutEffect` 的挂载函数并绑定 refs（例如执行 `ref.current = node`，或调用你的 ref 回调函数）。类组件的 `componentDidMount` 和 `componentDidUpdate` 也是在此处被调用的。
 
-At this point the DOM is fully updated and in the document. `getBoundingClientRect()` gives real numbers. The browser has not painted yet, because the JavaScript task is still running. That's what makes layout effects the right place to measure and adjust:
+在这个时间节点上，DOM 树已经完全更新完毕并挂载在文档中，调用 `getBoundingClientRect()` 能够拿到百分之百真实的几何尺寸。但**浏览器尚未真正绘制像素**，因为当前的 JavaScript 宏任务仍在同步霸占主线程。这也正是布局副作用（Layout effects）成为“测量尺寸并同步校准界面”绝佳场所的原因所在：
 
 ```jsx
 function Item({ item, onToggle }) {
@@ -81,87 +81,91 @@ function Item({ item, onToggle }) {
 }
 ```
 
-The `setHeight` here is treated as urgent, so React renders and commits it in the same task, before paint. The user never sees the frame with the old height. That's how "measure, then set state" avoids a flicker.
+这里在 `useLayoutEffect` 中调用的 `setHeight` 会被 React 视为同步紧急任务，React 会在当前同一个任务中立即完成重新渲染与提交，全部赶在浏览器把这一帧绘制到屏幕之前完成。因此，用户绝不会看到使用旧高度的中间帧，这就是经典的“测量尺寸后设置状态”能够彻底避免画面闪烁（Flicker）的底层原理。
 
-Layout effects run children first: a parent's layout effect can rely on its children's refs already being set.
+布局副作用严格遵循**子组件优先（Children first）**的执行顺序：父组件的 layout effect 执行时，完全可以笃定子组件的 refs 已经完成设置。
 
-> [!warning] Layout effects delay the first pixel
-> Everything in `useLayoutEffect` runs before the browser can paint, and reading layout there forces the browser to compute it right away. Keep layout effects to measure-and-adjust work. Data fetching, subscriptions and logging belong in `useEffect`.
+> [!warning] 布局副作用会推迟首屏绘制
+> `useLayoutEffect` 中的所有代码均在浏览器绘制屏幕之前同步执行，而且在此处读取布局属性会强制浏览器立即同步计算布局（Reflow）。因此，请仅将布局副作用用于“测量并同步调整样式”的操作。常规的数据拉取、事件订阅和埋点日志应归入 `useEffect`。
 
-## Passive effects: `useEffect`
+## 被动副作用：`useEffect`
 
-`useEffect` setups are **passive** effects. React doesn't run them inside the commit block. At the start of the commit it schedules a separate task for them, and the task usually runs after the browser has painted:
+`useEffect` 的挂载逻辑属于**被动副作用（Passive effects）**。React 绝不会在 Commit 同步执行块内运行它们。在 Commit 阶段开始时，React 会为它们在调度器中注册一个独立的异步任务，该任务通常会在**浏览器完成像素绘制之后**才执行：
 
 ```jsx
 function Header({ count }) {
   useEffect(() => {
-    document.title = `${count} items left`;
+    document.title = `${count} 项待办`;
   }, [count]);
-  return <h1>Shopping list ({count})</h1>;
+  return <h1>购物清单 ({count})</h1>;
 }
 ```
 
-Updating the title doesn't need to block the screen, so a passive effect is the right home.
+更新网页标题完全不需要阻塞屏幕的绘制呈现，因此被动副作用是处理此类操作的最理想归宿。
 
-There is an important exception. When the commit came from a **discrete update** (a click, a key press, `flushSync`), React runs the passive effects at the end of the commit, synchronously, **before** the browser paints. The result of an interaction is then immediately consistent, effects included. Checking off "Milk" is a click, so `Header`'s effect runs before that frame is painted.
+然而，这里存在一个极其关键的例外情况。当本次提交源于**离散更新（Discrete update）**——例如用户的点击事件（click）、键盘按键（keydown）或者调用了 `flushSync` 时，React 会在 Commit 阶段的末尾，**在浏览器绘制之前同步执行所有的被动副作用**。这样能够保证用户的直接交互结果及其引发的全部副作用立即达成状态一致。在购物清单中勾选“牛奶”属于点击交互，因此 `Header` 的 effect 实际上在浏览器绘制该帧之前就已经执行完毕了。
 
-> [!warning] "useEffect runs after paint" is a heuristic
-> For non-discrete updates React schedules effects in a separate task, and React yields so the browser can paint first. Whether the browser actually paints between the two tasks is up to the browser. And after a click, effects run before paint by design. If you need "before paint", use `useLayoutEffect`. If you truly need "after paint", don't rely on `useEffect` timing.
+> [!warning] “useEffect 在绘制后执行”仅是一项经验法则
+> 对于非离散更新，React 会在独立的任务中调度 effects，并主动向浏览器出让主线程以便浏览器先行绘制。但浏览器是否真的一定能在两个宏任务交替的间隙完成像素绘制，完全取决于浏览器自身的调度策略。而在点击等交互之后，effects 更是按设计会在绘制前同步执行。如果你坚决要求代码必须在“绘制之前”执行，请使用 `useLayoutEffect`；如果你严格要求必须在“真实绘制之后”执行，切莫完全依赖 `useEffect` 的时机（可以结合 `requestAnimationFrame`）。
 
-> [!tip] Mental model
-> Everything from the first DOM change to the last layout effect is one block of JavaScript, and the browser can only paint after it. `useEffect` is "soon after the commit": usually after paint, but before paint when the commit came from a click.
+> [!tip] 核心心智模型（Mental Model）
+> 从第一个 DOM 变更到最后一个布局副作用，全程是一个连贯不可分割的单一 JavaScript 任务，浏览器只有在该任务彻底结束后才能绘制屏幕。`useEffect` 的定位则是“Commit 结束之后尽快执行”：在常规场景下通常发生在绘制之后，但在由点击等离散交互触发的 Commit 中，则会在绘制之前同步清空。
 
-## Cleanup order
+## 清理函数（Cleanups）的执行时序
 
-When an effect's dependencies change, React runs its cleanup from the previous render, with the previous values, before running the new setup. Across the tree, the order is stronger than that:
+当某个 Effect 的依赖项发生变化时，React 会先用**上一次渲染保存的旧值**执行上一轮留下的清理函数，随后才运行新一轮的挂载函数（Setup）。而在整棵组件树的全局视角下，这一时序保证更加严密：
 
-- All layout cleanups run during mutation, before any layout setup runs.
-- In the passive phase, **all** `useEffect` cleanups in the tree run before **any** `useEffect` setup. That includes cleanups for components that were removed in this commit.
-- Within each pass, children run before parents.
+- **所有**布局副作用的清理函数（Layout cleanups）均在 Mutation 阶段集中执行，严格早于**任何**布局副作用挂载函数的执行；
+- 在被动副作用阶段（Passive phase），整棵树中**所有** `useEffect` 的清理函数，都必须严格在**任何** `useEffect` 的挂载函数执行之前全部跑完。这其中也完整包含了本轮提交中刚刚被移除的组件的清理函数；
+- 在上述每一轮遍历中，均严格遵循**子组件先于父组件（Children before parents）**的执行顺序。
 
-So one effect's setup never sees another effect's stale subscription still in place. Effects whose dependencies didn't change are skipped entirely: no cleanup, no setup.
+这一铁律保证了任何新 Effect 在启动挂载时，绝不会撞见另一个 Effect 尚未清理干净的陈旧订阅。至于那些依赖项自始至终未曾变动的 Effects，则会被 React 完整跳过：既不跑清理函数，也不跑挂载逻辑。
 
-## StrictMode runs effects twice in development
+## 开发模式下 StrictMode 会将 Effects 执行两次
 
-Under `<StrictMode>` in development, React mounts a component, runs its effect cleanups, then runs its effect setups again. It does this on purpose: if your effect doesn't clean up properly (a subscription that's never removed, a timer that's never cleared), the double run makes that visible on your machine. It happens only in development. Production runs each setup once per mount.
+在开发模式（Development）且开启了 `<StrictMode>` 的环境下，React 在挂载组件后，会紧接着执行一次该组件全部 Effect 的清理函数，随后再次执行它们的挂载函数（即：Setup → Cleanup → Setup）。
 
-If an effect breaks when it runs twice, the fix is a correct cleanup, not a ref that prevents the second run.
+这是 React 的深意所在：如果你的 Effect 存在隐蔽的内存泄漏或清理遗漏（例如未解绑的事件监听器、未取消的定时器或未中断的 WebSocket 订阅），这一双重执行机制能立刻在你的本地开发机上暴露出问题。这种现象**仅存在于开发环境**；生产环境下的 React 对每一次挂载只会严格执行一次 setup。
 
-## Choosing an effect
+如果你的 Effect 在执行两次时发生了崩溃或行为异常，正确的解决之道是**编写严谨完备的清理函数**，而不是用一个 `useRef` 去强行拦截第二次执行。
 
-| You need to… | Use |
+## 如何选择合适的 Effect？
+
+| 业务场景 | 选用方案 |
 |---|---|
-| Inject styles before layout is read (library authors) | `useInsertionEffect` |
-| Measure the DOM and adjust before the user sees it | `useLayoutEffect` |
-| Subscribe, fetch, log, sync with something outside React | `useEffect` |
-| Compute something from props or state | no effect, compute it during render |
+| 在浏览器读取布局尺寸之前动态注入样式（通常仅供 CSS-in-JS 库作者使用） | `useInsertionEffect` |
+| 测量 DOM 几何尺寸并在用户肉眼察觉前同步校准界面（杜绝闪烁） | `useLayoutEffect` |
+| 订阅外部数据源、网络数据请求、埋点上报、与 React 外部系统同步 | `useEffect` |
+| 基于已有的 props 或 state 派生计算某些值 | **无需使用任何 Effect**，直接在组件渲染期间纯计算即可 |
 
-Default to `useEffect`. Reach for `useLayoutEffect` only when the user would otherwise see a wrong frame.
+**黄金准则**：默认始终选用 `useEffect`。只有在确认如果不用就会导致用户肉眼瞥见一帧画面跳变或闪烁时，才选用 `useLayoutEffect`。
 
-## Common misconceptions
+## 常见认知误区
 
-- **"React may paint a half-updated DOM."**: The DOM changes, the swap and the layout effects are one synchronous block, so the browser can only paint once all of them are done.
-- **"useEffect always runs after paint."**: After a click or key press, React runs passive effects at the end of the commit, before paint. For other updates, "after paint" is the usual outcome, not a guarantee.
-- **"Effects running twice means React is buggy."**: That's StrictMode in development, testing your cleanups. Production runs each setup once per mount.
-- **"Refs are set during render."**: Refs are detached in mutation and attached in layout, during the commit. Reading `ref.current` during render shows the previous commit's value.
+- **“React 可能把更新了一半的 DOM 绘制到屏幕上”**：错误。DOM 的写入变更、树指针的原子切换以及所有布局副作用的执行，全部收敛在同一个不可分割的同步 JS 任务中，浏览器只有在这个任务彻底结束之后才有机会进行渲染绘制。
+- **“`useEffect` 必定在浏览器绘制像素之后执行”**：不准确。在点击或按键等离散用户输入之后，React 为了保证状态一致性，会在 Commit 阶段末尾立即同步清空 passive effects，此时先于浏览器绘制。而在其他更新场景下，“绘制之后”也只是一种通常预期，并非硬性规范保障。
+- **“Effect 跑了两次说明 React 出 bug 了”**：错误。这是开发环境下 `<StrictMode>` 的刻意机制，专门用来检验你的清理函数是否健全。在生产环境中，每次挂载依然只会严格执行一次 setup。
+- **“Refs 是在渲染期间完成赋值的”**：错误。Refs 的解绑发生在 Mutation 阶段，而重新赋值绑定则发生在 Layout 阶段，二者均严格处于 Commit 阶段内部。在组件渲染（Render）期间直接读取 `ref.current`，拿到的仅仅是上一次提交留下的旧值。
 
-## Summary
+## 总结
 
-The commit applies a finished render in one synchronous, uninterruptible block: it flushes leftover effects from the previous commit, reads the old DOM before mutation, changes the DOM and detaches refs in mutation, swaps the finished tree in as current, then runs layout effects and attaches refs before the browser can paint. Passive effects (`useEffect`) run in a separate task, usually after paint, but at the end of the commit when the update was discrete, such as a click. All cleanups run before the matching setups, and StrictMode in development runs effects twice to test those cleanups. Next, [[09 Hooks - Why Order Matters|Hooks - Why Order Matters]] looks at how React keeps track of all these effects and state between renders.
+Commit 阶段通过一个**不可中断的单一同步执行块**，将内存中已经构建完毕的渲染成果可靠地应用到真实界面：它首先冲刷清空上一轮提交遗留的未决副作用，在 Mutation 前阶段读取旧 DOM 快照并保存焦点与选区状态，在 Mutation 阶段集中执行真实 DOM 的增删改与旧 refs 的解绑，随后通过原子指针切换将新树升级为 current 树，并在浏览器绘制之前同步执行所有的布局副作用与新 refs 挂载。被动副作用（`useEffect`）则通常在浏览器完成绘制后的独立任务中运行，但在点击等离散交互场景下会在 Commit 末尾同步清空。所有清理函数都严格先于新一轮挂载函数执行，而在开发环境的 StrictMode 下，Effects 会被执行双重调用以提前暴露出缺失的清理逻辑。
 
-### Key takeaways
+在接下来的 [[09 Hooks - Why Order Matters|第 09 篇 · Hooks：为什么调用顺序决定一切]] 中，我们将探究 React 是如何在多次渲染之间井然有序地追踪与维持所有这些 Effects 与组件状态的。
 
-- **Uninterruptible commit**: DOM changes, the swap and layout effects run as one block, so users never see a half-updated screen.
-- **Before mutation**: React reads the old DOM, saves focus and selection, and runs `getSnapshotBeforeUpdate`.
-- **Mutation**: deletions, insertions and updates hit the DOM, refs detach, and `useInsertionEffect` and layout cleanups run.
-- **The swap**: the finished tree becomes current between mutation and layout, so removal code sees the old tree and mount code the new one.
-- **Layout**: `useLayoutEffect` and ref attachment run children first, with real layout but before paint; state set there commits before paint.
-- **Passive effects**: `useEffect` runs in a later task, usually after paint, but at the end of the commit for discrete updates like clicks.
-- **Cleanup order**: all cleanups run before any setups, including those of removed components, and unchanged effects are skipped.
-- **StrictMode**: in development, effects run setup, cleanup and setup again on mount to expose missing cleanups.
+### 核心要点归纳
 
-**Go deeper:** [[09 Commit Phase - Mutation, Layout, Passive Effects|Commit Phase]] · [[08 completeWork - Building DOM Nodes|completeWork]]
+- **不可中断的 Commit**：真实 DOM 修改、树指针切换以及布局副作用均在同一个同步任务中完成，用户绝无可能看到只更新了一半的残缺画面。
+- **Before Mutation**：读取旧 DOM 状态、妥善暂存焦点与文本选区，并触发类组件的 `getSnapshotBeforeUpdate`。
+- **Mutation（DOM 变更）**：真实 DOM 的增删改落地执行，旧 refs 完成解绑，`useInsertionEffect` 与旧布局副作用清理函数在此阶段同步运行。
+- **指针切换（The swap）**：Finished 树在 Mutation 与 Layout 之间被正式切换为 Current 树，确保卸载代码面向旧树、挂载代码面向新树。
+- **Layout（布局副作用）**：`useLayoutEffect` 与 refs 绑定按子组件优先顺序执行，此时可读取真实几何尺寸且先于浏览器绘制；在此处触发的状态更新会在绘制前同步完成渲染与提交。
+- **被动副作用（Passive effects）**：`useEffect` 通常在浏览器绘制后的后续任务中异步触发，但在点击等离散更新后会在 Commit 末尾同步清空。
+- **严格的清理顺序**：整棵树中所有的清理函数（包含已卸载组件）必须在任何新挂载函数启动前彻底跑完；依赖未变的 Effects 整体跳过。
+- **StrictMode 双重调用**：开发环境下挂载时依次执行 setup → cleanup → setup，以此验证清理逻辑的完备性。
+
+**深入探究源码实现：** [[09 Commit Phase - Mutation, Layout, Passive Effects|Commit 阶段底层剖析：Mutation、Layout 与 Passive Effects]] · [[08 completeWork - Building DOM Nodes|completeWork：构建 DOM 节点与冒泡属性]]
 
 ---
 
-← [[07 Priorities, Transitions and Concurrency|Prev]] · [[react-concepts|Index]] · [[09 Hooks - Why Order Matters|Next]] →
+← [[07 Priorities, Transitions and Concurrency|上一篇：第 07 篇 · 优先级、Transition 与并发机制]] · [[react-concepts|返回专栏目录]] · [[09 Hooks - Why Order Matters|下一篇：第 09 篇 · Hooks：为什么调用顺序决定一切]] →

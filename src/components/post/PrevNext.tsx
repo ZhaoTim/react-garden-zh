@@ -68,7 +68,7 @@ function Card({ post, dir }: { post: PostMeta; dir: "prev" | "next" }) {
               <Arrow size={14} />
             </motion.span>
           )}
-          {isNext ? "Next" : "Previous"}
+          {isNext ? "下一篇" : "上一篇"}
           {isNext && (
             <motion.span variants={{ rest: { x: 0 }, hover: { x: 3 } }} transition={spring.snappy}>
               <Arrow size={14} />

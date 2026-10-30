@@ -32,22 +32,23 @@ export function isoDate(iso: string): string {
 
 export function formatReading(minutes: number): string {
   const m = Math.max(1, Math.round(minutes));
-  if (m < 60) return `${m} min read`;
+  if (m < 60) return `约 ${m} 分钟阅读`;
   const h = Math.floor(m / 60);
   const r = m % 60;
-  return r ? `${h} h ${r} min read` : `${h} h read`;
+  return r ? `约 ${h} 小时 ${r} 分钟` : `约 ${h} 小时`;
 }
 
 /** Total duration for a series, e.g. "3 h 20 min". */
 export function formatDuration(minutes: number): string {
   const m = Math.max(1, Math.round(minutes));
-  if (m < 60) return `${m} min`;
+  if (m < 60) return `${m} 分钟`;
   const h = Math.floor(m / 60);
   const r = m % 60;
-  return r ? `${h} h ${r} min` : `${h} h`;
+  return r ? `${h} 小时 ${r} 分钟` : `${h} 小时`;
 }
 
 export function plural(n: number, one: string, many = `${one}s`): string {
+  if (one === "part") return `共 ${n} 篇`;
   return `${n} ${n === 1 ? one : many}`;
 }
 

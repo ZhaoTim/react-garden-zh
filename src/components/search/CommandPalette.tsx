@@ -63,7 +63,7 @@ export function CommandPalette({ search }: { search: SearchFn }) {
     <Overlay
       open={open}
       onClose={close}
-      label="Search notes"
+      label="搜索笔记"
       className="flex items-start justify-center px-3 pt-[min(14vh,7rem)] sm:px-6"
     >
       <Panel search={search} onClose={close} />
@@ -208,8 +208,8 @@ function Panel({ search, onClose }: { search: SearchFn; onClose: () => void }) {
             setActive(0);
           }}
           onKeyDown={onKeyDown}
-          placeholder="Search notes…"
-          aria-label="Search notes"
+          placeholder="搜索笔记与专栏…"
+          aria-label="搜索笔记"
           role="combobox"
           aria-expanded={hasList}
           aria-controls={hasList ? listId : undefined}
@@ -246,7 +246,7 @@ function Panel({ search, onClose }: { search: SearchFn; onClose: () => void }) {
       </div>
 
       <div className="scrollbar-thin flex-1 overflow-y-auto overscroll-contain p-2">
-        {!dq && <p className="px-3 pt-2 pb-1.5 text-xs font-medium text-subtle">Jump to</p>}
+        {!dq && <p className="px-3 pt-2 pb-1.5 text-xs font-medium text-subtle">快捷直达</p>}
         <p role="status" aria-live="polite" className="sr-only">
           {status}
         </p>
@@ -256,9 +256,9 @@ function Panel({ search, onClose }: { search: SearchFn; onClose: () => void }) {
             animate={{ opacity: 1, y: 0 }}
             className="px-4 py-10 text-center text-sm text-muted"
           >
-            No notes match <span className="font-medium text-fg">“{dq}”</span>.
+            未找到与 <span className="font-medium text-fg">“{dq}”</span> 相关的笔记。
             <br />
-            <span className="text-subtle">Try fewer or different words.</span>
+            <span className="text-subtle">请尝试更换或减少搜索关键词。</span>
           </motion.div>
         )}
         {hasList && (

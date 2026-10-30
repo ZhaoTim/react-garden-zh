@@ -1,70 +1,70 @@
 ---
-description: JSX compiles to plain, immutable element objects; components are functions that return them; and React keeps its own long-lived tree to connect those throwaway descriptions to the real DOM.
+description: JSX 最终会被编译为普通且不可变的元素对象（Element）；组件则是返回这些元素的普通函数；React 通过维护一棵常驻内存的内部树，将这些一次性的轻量描述与真实的 DOM 紧密关联起来。
 tags: [react, react-concepts, jsx, elements, renderers]
 react-version: 19.3.1
 created: 2026-10-25T12:07:48.338Z
 ---
 
-# Elements, Components and the Tree
+# 元素、组件与树模型（Elements, Components and the Tree）
 
-> [!summary] TL;DR
-> JSX is just a function call that returns a small, immutable object called an **element**: a type, props and a key. Components are functions that return elements, and React (not you) calls them. React keeps its own long-lived tree to match each fresh description to what is already on screen, and the renderer you install, `react-dom`, is what plugs that machinery into the `react` package you import.
+> [!summary] 核心速览（TL;DR）
+> JSX 本质上只是一次普通的函数调用，它返回一个微小、不可变的普通对象，被称为 **React 元素（Element）**，其核心包含 `type`、`props` 和 `key`。**组件（Component）**则是返回这些元素的函数，且**由 React（而非你）负责调用**。React 在内部维护着一棵生命周期漫长的常驻树，用来将每次新生成的轻量描述与当前屏幕上的内容进行比对；而你安装的渲染器（如 `react-dom`），正是将这套底层运转机制与你日常引入的 `react` 包连接起来的桥梁。
 
-[[01 The Big Idea - UI Is a Function of State|Part 1]] said your component returns "a description of the UI". That phrase hides a question most developers never ask: what exactly *is* `<Header count={2} />`? It isn't a DOM node. It isn't a component instance. You can log it, store it in a variable, pass it around. So what is it, and how does React turn it into a heading on the page?
+在 [[01 The Big Idea - UI Is a Function of State|第 1 篇：核心思想]] 中，我们提到组件返回的是“对 UI 的一份结构描述”。但这句话背后其实隐藏着一个绝大多数开发者从未深究过的问题：`<Header count={2} />` 到底*是个什么东西*？它既不是真实的 DOM 节点，也不是组件实例。你可以用 `console.log` 将它打印出来，可以保存在变量里，也可以作为参数到处传递。那么它究竟是什么？React 又是如何把它变成页面上那个真实可见的标题的？
 
-## JSX is a function call
+## JSX 本质上只是一次函数调用
 
-Browsers don't understand JSX. Your build tool compiles it away before the code runs. Since React 17, the default output (the "automatic runtime") calls a function named `jsx` from `react/jsx-runtime`. React 19 requires this runtime.
+浏览器根本无法识别 JSX 语法。在你代码运行之前，构建工具就已经将其转译掉了。自 React 17 起，默认的转译输出（即所谓的“自动运行时”（Automatic Runtime））会调用来自 `react/jsx-runtime` 的 `jsx` 函数。到了 React 19，更是强制要求使用该运行时。
 
 ```jsx
-// what you write
+// 你的源码写法
 <Header count={items.length} />
 
-// roughly what the compiler emits
+// 编译器转译后的输出大致如下
 import { jsx as _jsx } from "react/jsx-runtime";
 _jsx(Header, { count: items.length });
 ```
 
-Children go into the props object, and a `key`, if you write one, is passed as a separate argument:
+子元素（`children`）会被合并进 `props` 对象中；而如果你显式传入了 `key`，它则会作为独立的单独参数传递：
 
 ```jsx
-// what you write
+// 你的源码写法
 <Item key={item.id} item={item} onToggle={onToggle} />
 
-// roughly what the compiler emits
+// 编译器转译后的输出大致如下
 _jsx(Item, { item: item, onToggle: onToggle }, item.id);
 ```
 
-You may have seen `React.createElement(type, props, ...children)` in older tutorials. It does the same job with a different calling convention. Either way, the point is the same: **JSX is ordinary JavaScript that builds a value.** There's no template language, no magic. That's why you can use `map`, `&&` and ternaries inside it: they're just expressions producing arguments.
+你或许在早期的教程中见过 `React.createElement(type, props, ...children)`。它们做的事情完全一样，区别仅在于调用约定的传参格式不同。无论哪种形式，核心本质都毫无二致：**JSX 就是普普通通的 JavaScript，用于计算并构建出一个值**。这里没有任何模板语言，也没有任何黑魔法。正因如此，你才能在其中自由使用 `map`、`&&` 和三元运算符——它们无非就是求值并生成参数的普通 JS 表达式。
 
-## Elements are plain objects
+## 元素只是普通的 JavaScript 对象
 
-What does `_jsx` return? A small object. In production it looks roughly like this:
+那么 `_jsx` 执行后到底返回了什么？一个轻量级的小对象。在生产环境中，它大致长成这个样子：
 
 ```js
 {
   $$typeof: Symbol.for("react.transitional.element"),
-  type: Header,            // a function, or a string like "li"
-  key: null,               // string or null
-  props: { count: 1 },     // includes children (and ref, in React 19)
+  type: Header,            // 可以是一个函数，也可以是类似 "li" 的字符串
+  key: null,               // 字符串或 null
+  props: { count: 1 },     // 包含 children（在 React 19 中也包含 ref）
 }
 ```
 
-That's an **element**. Four things matter:
+这就是所谓的 **React 元素（Element）**。其中有四个核心属性至关重要：
 
-- **`type`** says what to render. A string like `"main"` or `"li"` means a host element (a DOM node in the browser). A function like `Header` means a component.
-- **`props`** holds everything you passed, including `children`. In React 19, `ref` is also just a prop.
-- **`key`** is an identity hint for lists. React pulls it out of props, which is why a component can't read `props.key`. [[05 Reconciliation - Finding What Changed|Part 5]] explains what it is used for.
-- **`$$typeof`** is a Symbol that marks the object as a genuine React element. JSON can't contain Symbols, so a malicious JSON payload can't pretend to be an element.
+- **`type`**：标明要渲染什么。如果是一个字符串（如 `"main"` 或 `"li"`），代表宿主元素（Host Element，在浏览器环境下就是原生 DOM 节点）；如果是一个函数（如 `Header`），则代表一个自定义组件。
+- **`props`**：包含你传递的所有属性与子元素（`children`）。在 React 19 中，`ref` 也已回归为普通的 prop。
+- **`key`**：列表元素的唯一身份标识提示。React 会特意把它从 props 中抽离出来，这也是为什么组件内部无法通过 `props.key` 读取到它的原因。[[05 Reconciliation - Finding What Changed|第 5 篇：协调机制]] 会详细拆解它的深层原理。
+- **`$$typeof`**：一个特殊的 Symbol，用于将该对象标记为一个合法的 React 元素。由于 JSON 格式无法序列化 Symbol，这可以有效防止恶意 JSON 攻击伪造 React 元素注入页面（防范 XSS 漏洞）。
 
-Elements are **cheap and immutable**. Every render creates a fresh batch of them, and they are thrown away soon after. In development React even freezes them, so mutating `element.props` throws. You never update an element. You make a new one.
+元素是**极其轻量且不可变（Immutable）**的。组件的每一次渲染都会重新创建一批全新的元素对象，并在协调结束后很快被垃圾回收。在开发模式下，React 甚至会通过 `Object.freeze` 冻结它们，任何试图直接修改 `element.props` 的操作都会抛出异常。**你永远无法更新一个已有的元素，你只能重新创建一个新的**。
 
-> [!tip] Mental model
-> An element is a lightweight note that says "put a `Header` here with `count: 1`". It describes, it doesn't do. Writing the note is cheap, and React writes a fresh set of notes on every render.
+> [!tip] 核心心智模型
+> React 元素就像一张轻飘飘的便签纸，上面写着：“请在这里放一个 `Header`，并传入 `count: 1`”。它只负责**描述**，自己从不**执行**任何动作。写这样一张便签的成本极其低廉，而 React 在每次渲染时都会重新写下一叠全新的便签。
 
-## Components are functions that return elements
+## 组件是返回元素的函数
 
-A component is a function that takes props and returns elements:
+组件本质上就是一个接收 props 作为输入并返回 React 元素的普通函数：
 
 ```jsx
 function Header({ count }) {
@@ -82,110 +82,114 @@ function List({ items, onToggle }) {
 }
 ```
 
-Notice what `App` does *not* do: it never calls `Header(...)`. It creates an element whose `type` is `Header`. Calling the function is React's job, and React decides when. That separation is what makes the rest of React possible. Because React does the calling, it can set things up beforehand (which component is rendering, where its state lives), skip the call when nothing changed, or call it again later.
+请格外注意父组件（如 `App`）**没有做的事情**：它从未直接去执行 `Header(...)`。它只是创建了一个 `type` 为 `Header` 的元素对象。**真正调用组件函数是 React 的工作，并且由 React 全权决定调用的时机**。
 
-> [!warning] Don't call components as functions
-> `{Header({ count })}` will appear to work, but `Header` is then just part of the parent's code. It has no place of its own in React's tree, so any hooks it calls would belong to the parent, and React can't skip it or keep its state separately. Always render components as `<Header count={count} />`.
+这种“掌控调用权”的职责分离，正是支撑起 React 其余所有强大特性的基石。正是因为由 React 来负责调用函数，它才能在执行前做好环境准备（明确当前是哪个组件在渲染、其对应的状态存储在哪里）、在数据未变更时聪明地跳过调用，或是根据调度策略在稍后重试执行。
 
-## Three trees, not one
+> [!warning] 切勿直接像普通函数那样调用组件
+> 在 JSX 中写 `{Header({ count })}` 表面上看起来也能渲染，但此时 `Header` 仅仅是父组件内部执行的一段普通逻辑。它在 React 内部树中完全没有属于自己的独立节点，导致它内部调用的任何 Hooks 都会错乱地挂载在父组件身上，React 也无法为其独立维护状态或跳过无用重渲染。请务必始终以 `<Header count={count} />` 的形式来渲染组件。
 
-When people say "the React tree", they mean one of three different things. Keeping them apart clears up a lot of confusion.
+## 是三棵树，而非一棵树
+
+当大家提到“React 树”时，他们所指的往往是三种截然不同的树形结构之一。把这三者厘清分辨，能瞬间解开很多困扰已久的谜团。
 
 ```mermaid
 flowchart LR
-    subgraph E["Elements<br/>new every render"]
+    subgraph E["元素树（Element Tree）<br/>每次渲染全新创建"]
         E1["main"] --> E2["Header"]
         E1 --> E3["List"]
     end
-    subgraph F["React's tree<br/>kept between renders"]
+    subgraph F["React 内部树（Fiber Tree）<br/>跨渲染周期长期常驻"]
         F1["App"] --> F2["main"]
         F2 --> F3["Header"]
         F2 --> F4["List"]
         F3 --> F5["h1"]
     end
-    subgraph D["DOM<br/>what the browser shows"]
+    subgraph D["DOM 树<br/>浏览器最终展示内容"]
         D1["main"] --> D2["h1"]
         D1 --> D3["ul"]
     end
-    E -->|reconcile| F
-    F -->|commit| D
+    E -->|协调比对（reconcile）| F
+    F -->|提交变更（commit）| D
 ```
 
-1. **The element tree.** What your components return on a given render. It's partial: `App` returns elements for `main`, `Header`, `AddItem` and `List`, but not for the `h1` inside `Header`, because `Header` hasn't been called yet. It's rebuilt from scratch every time.
-2. **React's internal tree.** One node for every mounted component and every host element. It lives as long as the component stays on screen, and it's where state, hooks and pending work are stored. React calls these nodes **fibers**, and [[06 Fiber - Work You Can Pause|part 6]] is about them. Your components appear in this tree; in the DOM they leave no trace.
-3. **The DOM tree.** Only host elements: `main`, `h1`, `ul`, `li`. `App`, `Header` and `List` don't exist in the DOM at all.
+1. **元素树（The Element Tree）**：组件在特定渲染阶段返回的对象树。它是“局部”且不完整的：例如 `App` 返回了 `main`、`Header`、`AddItem` 和 `List` 的元素描述，但并不包含 `Header` 内部的 `h1`，因为此时 `Header` 函数本身还没被执行。这棵树在每次渲染时都会从零重新构建，用完即弃。
+2. **React 内部树（React's Internal Tree）**：为每一个已挂载的组件以及原生宿主元素建立的内部节点树。只要组件还展示在屏幕上，它就一直存活；这里是组件状态（State）、Hooks 链表以及待处理工作（Pending Work）真正寄宿的地方。React 将这些节点称为 **Fiber**，[[06 Fiber - Work You Can Pause|第 6 篇：Fiber 架构]] 将对此专门剖析。你编写的自定义组件全部存在于这棵树中，但在最终的 DOM 结构里则不留一丝痕迹。
+3. **DOM 树（The DOM Tree）**：仅包含原生的宿主元素，如 `main`、`h1`、`ul`、`li`。`App`、`Header` 或 `List` 在真实 DOM 树中根本不存在。
 
-The element tree is the *input*. React's tree is the *memory*. The DOM is the *output*. Rendering walks React's tree, calls your components to get fresh elements, and updates the tree to match. Commit then copies the changes into the DOM.
+简而言之：**元素树是「输入」，React 内部树是「记忆」，而 DOM 树是「输出」**。渲染过程会遍历 React 内部树，调用你的组件函数以获取全新的元素描述，并更新内部树以反映最新变化；随后在提交阶段，React 将变动批量同步至真实 DOM。
 
-This also explains where state lives. It can't live in elements, because elements are new every render. It can't live in your function, because a function call ends. It lives in React's tree, on the node for that component instance, which survives from one render to the next.
+这同时也揭开了“状态（State）到底保存在哪里”的秘密：状态不可能存在于元素中，因为元素每次渲染都会全部推倒重来；状态也不可能保存在你的组件函数内部，因为函数一旦执行完毕就会出栈。**状态真正寄宿在 React 内部常驻树上对应的组件实例节点（Fiber）之中**，在不同的渲染周期之间得以稳固留存。
 
-## react and react-dom: describing vs doing
+## react 与 react-dom：负责「描述」与负责「干活」
 
-You install two packages, and they have very different jobs.
+你在项目中通常会安装两个包，而它们的分工截然不同。
 
-**`react`** is small. It contains `jsx`, `useState`, `memo`, `createContext`, `startTransition` and friends. It knows nothing about the DOM, nothing about fibers, nothing about how rendering works. It is mostly the vocabulary for describing UI.
+**`react`** 非常精简，仅包含 `jsx`、`useState`、`memo`、`createContext`、`startTransition` 等 API。它对 DOM 一无所知，对 Fiber 架构一无所知，甚至完全不知道渲染的具体执行机制。它本质上只是供开发者用来描述 UI 的**声明式词汇表**。
 
-**`react-dom`** is a **renderer**. It contains the actual machinery: the reconciler that walks React's tree, the scheduler integration, and the code that creates and updates DOM nodes. Other renderers (React Native, or `react-three-fiber` for 3D scenes) carry the same kind of machinery but create native views or 3D objects instead of DOM nodes.
+**`react-dom`** 则是一个**渲染器（Renderer）**。它包含了真正干粗活的核心引擎：负责遍历 React 内部树的协调器（Reconciler）、任务调度器集成（Scheduler），以及直接创建和修改浏览器真实 DOM 节点的底层代码。其他的渲染器（比如移动端的 React Native，或是面向 3D 场景的 `react-three-fiber`）都承载着同样一套协调调度机制，只是最终创建的是原生移动端视图或 3D 物体，而不是浏览器 DOM 节点。
 
-This split is why one component model works on many platforms. Your `Header` returns `<h1>` and has no idea who will turn that into something visible.
+正是这种“职责解耦”的架构设计，使得同一套组件化模型能够无缝复用于多端平台。你的 `Header` 组件只管返回一个 `<h1>` 描述，至于最终究竟由谁把它转化为屏幕上真实可见的像素，组件本身根本无须关心。
 
-## Where hooks get their power
+## Hooks 的威力究竟源自何处？
 
-That split raises a puzzle. `useState` comes from `react`, and `react` knows nothing about rendering. So how does `useState` find the right component's state?
+上述分工带来了一个耐人寻味的技术谜题：`useState` 明明是从 `react` 包中导出的，而 `react` 对渲染引擎又一无所知，那 `useState` 到底是如何精准找到属于当前组件的状态数据的？
 
-Conceptually, `react` keeps a shared slot for "the current hooks implementation", often called the **dispatcher**. The `useState` you import is a thin forwarder: it looks in that slot and calls whatever it finds there.
+在概念设计上，`react` 包在底层维护着一个共享槽位，专门用来存放“当前有效的 Hooks 具体实现”，这在 React 源码中被称为 **Dispatcher（调度分发器）**。你在代码中 import 进来的 `useState` 本质上只是一个极其轻量的转发代理：它直接读取这个全局槽位，并调用里面当前挂载的具体函数。
 
 ```js
-// simplified pseudocode, not real source
+// 简化后的概念伪代码，非真实源码
 function useState(initial) {
   const dispatcher = shared.currentDispatcher;
   return dispatcher.useState(initial);
 }
 ```
 
-Right before React calls one of your components, the renderer puts its own hooks implementation into that slot, one for the first render (mount) and one for later renders (update). When your component returns, the slot is switched to a version that throws if you call a hook.
+在 React 准备调用你的某个组件函数**之前的一瞬间**，渲染器（`react-dom`）会将自己内部对应的 Hooks 实现注入到这个共享槽位中——首次挂载（Mount）与后续更新（Update）分别注入不同版本的实现。而一旦你的组件函数执行完毕并返回结果，渲染器会立刻将该槽位切换为一个“只要调用就会抛出异常”的报错版本。
 
 ```mermaid
 sequenceDiagram
-    participant RD as react-dom
-    participant S as shared slot
-    participant C as Your component
-    RD->>S: install hooks for this render
-    RD->>C: call component
-    C->>S: useState
-    S-->>C: state for this component
-    C-->>RD: return elements
-    RD->>S: reset to hooks-not-allowed
+    participant RD as 渲染器（react-dom）
+    participant S as 共享槽位（dispatcher）
+    participant C as 你的组件
+    RD->>S: 装载当前渲染专用的 Hooks 实现
+    RD->>C: 调用组件函数
+    C->>S: useState(...)
+    S-->>C: 返回该组件专属的状态
+    C-->>RD: 返回元素描述
+    RD->>S: 重置为“禁止调用 Hooks”的报错版本
 ```
 
-That one design explains the error everyone has seen at least once, "Invalid hook call":
+单单这一个精妙的架构设计，就彻底解释了每个 React 开发者都必定见过的经典报错——“Invalid hook call”（Hooks 调用无效）：
 
-- You called a hook outside a component's render, for example in an event handler, so the slot held no working hooks implementation.
-- Or your bundle contains **two copies** of React. The renderer filled the slot in one copy, and your component imported `useState` from the other, whose slot was never filled.
+- **你在组件渲染流程之外调用了 Hook**（例如在事件处理回调函数中）：此时共享槽位中挂载的是报错版本，因为渲染器并未处于组件执行窗口期。
+- **构建打包产物中存在多份重复的 React 副本（Duplicate React）**：渲染器将实现注入到了其中一份 `react` 实例的槽位中，而你的组件却从另一份未被注入的 `react` 实例中引入了 `useState`。
 
-## Common misconceptions
+## 常见认知误区
 
-- **"JSX creates DOM nodes"**: JSX creates plain element objects. DOM nodes are created later, by the renderer, during commit.
-- **"An element is a component instance"**: an element is a throwaway description. The long-lived thing that holds state is React's internal node for that component.
-- **"React re-creates the DOM every render because elements are new every time"**: new elements are compared against React's tree, and only real differences reach the DOM.
-- **"`useState` is wired to your component when you import it"**: the imported function only forwards to whatever hooks implementation the renderer installed for the component currently rendering.
+- **“JSX 会直接创建 DOM 节点”**：错误。JSX 仅仅创建轻量级的普通元素对象。真实的 DOM 节点是在后续的提交阶段（Commit）由渲染器统一创建并挂载的。
+- **“一个 React 元素就是一个组件实例”**：错误。元素只是一份用完即弃的纯数据描述。真正常驻内存并承载组件状态的实体，是 React 内部树上对应的 Fiber 节点。
+- **“因为每次渲染元素都是全新的，所以 React 每次都会重建 DOM”**：错误。每次生成的新元素只会与 React 内部常驻树进行比对，只有真正计算出差异的部分才会最终写入 DOM。
+- **“从 react 包引入的 `useState` 在编译时就已经和你的组件绑定在一起了”**：错误。引入的函数只是一个空壳转发器，它仅仅将调用动态转发给渲染器在当前组件渲染前注入的具体 Dispatcher 实现。
 
-## Summary
+## 总结
 
-JSX compiles to `jsx` calls that return small, immutable element objects with a `type`, `props` and `key`, recreated on every render. Components are functions that return elements, and React calls them, which is what lets it manage state, skip work and re-run code. Keep three trees apart: the throwaway element tree, React's long-lived internal tree where state lives, and the DOM, which contains only host elements. The `react` package describes, a renderer like `react-dom` does the work, and hooks reach the renderer through a shared slot it fills just before your component runs. [[03 What Rendering Really Means|Part 3]] looks at exactly when and why React calls your components.
+JSX 在底层会被编译为对 `jsx` 函数的调用，返回包含 `type`、`props` 和 `key` 的轻量、不可变元素对象，且在每次渲染时都会全新创建。组件则是接收属性并返回元素描述的普通函数，而**由 React 全权负责调用它们**——正是这种调用权的让渡，使得 React 能够自主管理状态生命周期、智能跳过不必要的重复计算并在需要时重新执行代码。
 
-### Key takeaways
+请务必在脑海中清晰划分三棵树的界限：**用完即弃的元素树**、**存储状态与 Fiber 节点的常驻内部树**，以及**仅包含原生宿主节点的 DOM 树**。在宏观架构上，`react` 包负责提供描述 UI 的词汇表，`react-dom` 等渲染器负责执行协调与 DOM 变动的实际工作，而 Hooks 则通过渲染器在组件执行前动态装载的 Dispatcher 共享槽位与底层引擎连通。在下一篇 [[03 What Rendering Really Means|第 3 篇：渲染的真正含义]] 中，我们将深入剖析 React 究竟在何时、因何缘由才会去重新调用你的组件。
 
-- **JSX**: compiles to `jsx(type, props, key)` calls from `react/jsx-runtime`; it's ordinary JavaScript building values.
-- **Elements**: plain objects with `type`, `props`, `key` and a `$$typeof` Symbol; immutable and recreated every render.
-- **Components**: functions from props to elements, called by React, never by you.
-- **Three trees**: the element tree is input, React's internal tree is memory, the DOM is output.
-- **State location**: state lives on React's long-lived node for a component instance, not in elements or in your function.
-- **Renderers**: `react` is the vocabulary; `react-dom` contains the reconciler and the DOM code.
-- **Dispatcher**: hooks forward to an implementation the renderer installs right before your component runs, which is why hooks fail outside render or with two copies of React.
+### 核心要点归纳
 
-**Go deeper:** [[01 Bootstrap - Packages, JSX and the Dispatcher|Bootstrap: packages, JSX and the dispatcher]] · [[05 The Fiber Data Structure|The fiber data structure]]
+- **JSX 本质**：被编译为来自 `react/jsx-runtime` 的 `jsx(type, props, key)` 调用；它就是用于计算生成普通 JavaScript 对象的常规代码。
+- **React 元素**：拥有 `type`、`props`、`key` 以及防篡改的 `$$typeof` 标记的普通不可变对象；每次渲染全新生成。
+- **组件角色**：将 props 映射为元素描述的纯函数；由 React 决定何时调用，开发者切勿手动调用。
+- **三棵树分工**：元素树是「输入」，React 内部树（Fiber）是「记忆」，真实 DOM 是「输出」。
+- **状态归属**：状态存储于 React 内部常驻树中对应的组件实例节点上，既不在元素中，也不在函数闭包内。
+- **渲染器解耦**：`react` 负责界面描述，`react-dom` 封装了核心协调器以及真正的 DOM 操作引擎。
+- **Dispatcher 机制**：Hooks 只是将调用转发给渲染器在组件执行前即时装入的实现；这一机制解释了为何在渲染上下文之外调用 Hook 或存在多个 React 副本时会导致报错。
+
+**深入探究源码实现：** [[01 Bootstrap - Packages, JSX and the Dispatcher|初始化引导：包结构、JSX 与 Dispatcher]] · [[05 The Fiber Data Structure|Fiber 数据结构剖析]]
 
 ---
 
-← [[01 The Big Idea - UI Is a Function of State|Prev]] · [[react-concepts|Index]] · [[03 What Rendering Really Means|Next]] →
+← [[01 The Big Idea - UI Is a Function of State|上一篇：核心思想]] · [[react-concepts|专栏目录]] · [[03 What Rendering Really Means|下一篇：渲染的真正含义]] →

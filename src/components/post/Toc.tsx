@@ -102,9 +102,7 @@ export function Toc({ headings, className }: { headings: Heading[]; className?: 
   if (items.length < 2) return null;
   return (
     <nav aria-label="On this page" className={cn("text-sm", className)}>
-      <p className="mb-3 text-xs font-semibold tracking-[0.08em] text-subtle uppercase">
-        On this page
-      </p>
+      <p className="mb-3 text-xs font-semibold tracking-[0.08em] text-subtle uppercase">本页目录</p>
       <div className="scrollbar-thin max-h-[calc(100dvh-var(--header-h)-8rem)] overflow-y-auto overscroll-contain pr-1">
         <TocList headings={items} active={active} layoutId="toc-active" />
       </div>
@@ -246,7 +244,7 @@ export function MobileToc({ headings }: { headings: Heading[] }) {
                 className="flex shrink-0 touch-none items-center justify-between px-5 pt-1 pb-3"
               >
                 <p className="flex items-center gap-2 text-sm font-semibold">
-                  <ListIcon size={16} className="text-subtle" /> On this page
+                  <ListIcon size={16} className="text-subtle" /> 本页目录
                 </p>
                 <button
                   ref={closeRef}

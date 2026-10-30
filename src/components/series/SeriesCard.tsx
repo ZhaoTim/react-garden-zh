@@ -43,7 +43,7 @@ export function SeriesCard({
       />
       <div className="flex flex-col p-6 sm:p-8">
         <p className="inline-flex items-center gap-2 text-xs font-medium tracking-wide text-accent-strong uppercase">
-          <Layers size={14} /> Series
+          <Layers size={14} /> 专栏课程
         </p>
         <h3 className="mt-3 font-serif text-3xl leading-tight font-medium tracking-tight text-balance sm:text-[2.125rem]">
           <Link
@@ -74,7 +74,7 @@ export function SeriesCard({
             </div>
           ) : null}
           <div className="flex items-center gap-1.5">
-            <dt>Updated</dt>
+            <dt>更新于</dt>
             <dd>
               <time dateTime={isoDate(folder.latest)}>{formatDate(folder.latest)}</time>
             </dd>
@@ -96,7 +96,7 @@ export function SeriesCard({
           </ol>
         )}
         <span className="mt-auto inline-flex items-center gap-2 pt-6 text-sm font-medium text-fg">
-          Start the series
+          开始阅读专栏
           <ArrowRight
             size={16}
             className="text-accent transition-transform duration-300 group-hover:translate-x-1"
