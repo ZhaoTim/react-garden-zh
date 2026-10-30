@@ -54,12 +54,12 @@ function App() {
 
 ```mermaid
 flowchart LR
-    A["setText('')"] --> Q["将更新加入队列"]
-    Q --> S["调度单次渲染"]
-    B["setItems([...])"] --> Q2["将更新加入队列"]
+    A["setText('')"] --> Q[Update added<br/>to the queue]
+    Q --> S[Render scheduled<br/>once]
+    B["setItems([...])"] --> Q2[Update added<br/>to the queue]
     Q2 --> S
-    S --> R["单次渲染集中读取<br/>队列中的全部更新"]
-    R --> C["提交 DOM 变更<br/>(Commit)"]
+    S --> R[One render reads<br/>all queued updates]
+    R --> C[Commit]
 ```
 
 ## 直接传值 vs 传递更新函数（Values vs updater functions）
@@ -118,17 +118,17 @@ onAdd={() => {
 
 ```mermaid
 sequenceDiagram
-    participant H as 你的点击事件处理函数
+    participant H as Your click handler
     participant R as React
-    participant B as 浏览器
+    participant B as Browser
     H->>R: setItems(...)
-    R->>R: 将更新入队，调度微任务
+    R->>R: queue update, schedule microtask
     H->>R: setText('')
-    R->>R: 将更新入队，发现微任务已在调度中
-    Note over H: 处理函数执行完毕返回
-    R->>R: 执行微任务：单次重新渲染 App
-    R->>B: 提交 DOM 变更 (Commit)
-    Note over B: 紧接着浏览器执行重绘 (Paint)
+    R->>R: queue update, already scheduled
+    Note over H: handler returns
+    R->>R: microtask: render App once
+    R->>B: commit DOM changes
+    Note over B: then paint
 ```
 
 如果是来自非紧急源头的更新（如定时器、网络请求响应），虽然同样会被批处理，但 React 会为其分配较低的优先级，并在稍后的宏任务调度中执行，而非塞在微任务里抢占主线程。如果使用 `startTransition` 包裹更新，优先级还会被进一步调低。在 [[07 Priorities, Transitions and Concurrency|第 7 篇 · 优先级调度与并发]] 中，我们将详细剖析这套优先级调度机制。

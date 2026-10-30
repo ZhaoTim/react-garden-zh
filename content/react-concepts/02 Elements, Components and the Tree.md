@@ -95,22 +95,22 @@ function List({ items, onToggle }) {
 
 ```mermaid
 flowchart LR
-    subgraph E["元素树（Element Tree）<br/>每次渲染全新创建"]
+    subgraph E["Elements<br/>new every render"]
         E1["main"] --> E2["Header"]
         E1 --> E3["List"]
     end
-    subgraph F["React 内部树（Fiber Tree）<br/>跨渲染周期长期常驻"]
+    subgraph F["React's tree<br/>kept between renders"]
         F1["App"] --> F2["main"]
         F2 --> F3["Header"]
         F2 --> F4["List"]
         F3 --> F5["h1"]
     end
-    subgraph D["DOM 树<br/>浏览器最终展示内容"]
+    subgraph D["DOM<br/>what the browser shows"]
         D1["main"] --> D2["h1"]
         D1 --> D3["ul"]
     end
-    E -->|协调比对（reconcile）| F
-    F -->|提交变更（commit）| D
+    E -->|reconcile| F
+    F -->|commit| D
 ```
 
 1. **元素树（The Element Tree）**：组件在特定渲染阶段返回的对象树。它是“局部”且不完整的：例如 `App` 返回了 `main`、`Header`、`AddItem` 和 `List` 的元素描述，但并不包含 `Header` 内部的 `h1`，因为此时 `Header` 函数本身还没被执行。这棵树在每次渲染时都会从零重新构建，用完即弃。
@@ -149,15 +149,15 @@ function useState(initial) {
 
 ```mermaid
 sequenceDiagram
-    participant RD as 渲染器（react-dom）
-    participant S as 共享槽位（dispatcher）
-    participant C as 你的组件
-    RD->>S: 装载当前渲染专用的 Hooks 实现
-    RD->>C: 调用组件函数
-    C->>S: useState(...)
-    S-->>C: 返回该组件专属的状态
-    C-->>RD: 返回元素描述
-    RD->>S: 重置为“禁止调用 Hooks”的报错版本
+    participant RD as react-dom
+    participant S as shared slot
+    participant C as Your component
+    RD->>S: install hooks for this render
+    RD->>C: call component
+    C->>S: useState
+    S-->>C: state for this component
+    C-->>RD: return elements
+    RD->>S: reset to hooks-not-allowed
 ```
 
 单单这一个精妙的架构设计，就彻底解释了每个 React 开发者都必定见过的经典报错——“Invalid hook call”（Hooks 调用无效）：

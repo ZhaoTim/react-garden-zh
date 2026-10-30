@@ -24,13 +24,13 @@ created: 2026-10-25T12:08:45.079Z
 
 ```mermaid
 flowchart TD
-  A["清理上一轮残余副作用<br/>（Flush leftover effects）"] --> B["Before Mutation 阶段：<br/>读取旧 DOM 快照"]
-  B --> C["Mutation 阶段（DOM 变更）：<br/>删除、插入、更新真实 DOM<br/>解绑旧 refs"]
-  C --> D["双缓冲指针切换（Swap）：<br/>Finished 树正式切换为 Current 树"]
-  D --> E["Layout 阶段（布局副作用）：<br/>执行 useLayoutEffect、挂载新 refs"]
-  E --> P["浏览器像素绘制<br/>（Browser paints）"]
-  E -.->|"点击等离散交互后"| F["Passive 阶段：<br/>异步执行 useEffect"]
-  P -.->|"其他常规场景下"| F
+  A["Flush leftover effects<br/>from the last commit"] --> B["Before mutation:<br/>read old DOM"]
+  B --> C["Mutation:<br/>delete, insert, update DOM<br/>detach refs"]
+  C --> D["Swap: finished tree<br/>becomes current"]
+  D --> E["Layout:<br/>useLayoutEffect, attach refs"]
+  E --> P["Browser paints"]
+  E -.->|"after a click"| F["Passive: useEffect"]
+  P -.->|"otherwise, usually"| F
 ```
 
 ## 步骤 0：清空上一轮提交遗留的副作用

@@ -93,10 +93,10 @@ React 在你与框架本身之间划定了一条极其清晰的职责分工界�
 
 ```mermaid
 flowchart LR
-    T["触发（Trigger）<br/>setState、首次挂载"] --> R["渲染阶段（Render phase）<br/>调用组件函数，<br/>与上一次描述进行比对"]
-    R --> C["提交阶段（Commit phase）<br/>将差异应用到真实 DOM，<br/>执行各种副作用（Effects）"]
-    C --> P["浏览器绘制（Paint）"]
-    P -.->|用户交互| T
+    T["Trigger<br/>setState, first mount"] --> R["Render phase<br/>call components,<br/>compare with last time"]
+    R --> C["Commit phase<br/>apply DOM changes,<br/>run effects"]
+    C --> P[Browser paints]
+    P -.->|user acts| T
 ```
 
 **渲染（Render）阶段**：指的是 React 调用你的组件函数，获取一份最新的 UI 描述，并将其与上一次的描述进行比对。**在渲染阶段，屏幕上不会发生任何实质性的像素变化**。这完全是内存中的纯计算阶段，正因如此，React 在并发模式下才能做到随意暂停它、丢弃它、或者重新开始计算。

@@ -43,15 +43,15 @@ React 团队给出的破局方案是：**彻底放弃将调用栈作为待办任
 
 ```mermaid
 flowchart TD
-  App["App"] -->|child（子节点）| main["main"]
-  main -->|child（子节点）| Header["Header"]
-  Header -->|sibling（兄弟节点）| AddItem["AddItem"]
-  AddItem -->|sibling（兄弟节点）| List["List"]
-  List -->|child（子节点）| ul["ul"]
-  ul -->|child（子节点）| I1["Item 牛奶"]
-  I1 -->|sibling（兄弟节点）| I2["Item 面包"]
-  I2 -.->|return（父级指针）| ul
-  List -.->|return（父级指针）| main
+  App["App"] -->|child| main["main"]
+  main -->|child| Header["Header"]
+  Header -->|sibling| AddItem["AddItem"]
+  AddItem -->|sibling| List["List"]
+  List -->|child| ul["ul"]
+  ul -->|child| I1["Item Milk"]
+  I1 -->|sibling| I2["Item Bread"]
+  I2 -.->|return| ul
+  List -.->|return| main
 ```
 
 注意：所有的子节点不再保存在一个扁平数组中，而是组织成一条**单向链表**。凭借 `child`、`sibling` 和 `return` 这三个指针，React 仅凭一个普通的 `while` 循环和一个记录“当前正在处理哪个 Fiber”的全局变量，就能在组件树中自如穿梭：向下深潜、横向平移、向上回溯。
@@ -112,9 +112,9 @@ while (fiber !== null) {
 
 ```mermaid
 flowchart LR
-  R["FiberRoot 根节点"] -->|current| C["App（当前树，已上屏展示）"]
-  C <-->|alternate| W["App（workInProgress 树，后台构建中）"]
-  W -.->|"Commit 阶段：<br/>指针切换为最新 current"| R
+  R["root"] -->|current| C["App, on screen"]
+  C <-->|alternate| W["App, being built"]
+  W -.->|"on commit:<br/>becomes current"| R
 ```
 
 当渲染阶段大功告成进入 Commit 阶段时，React **不需要做任何繁琐的数据深拷贝**。它仅仅是将根节点（`FiberRoot`）的 `current` 引用一指，直接指向构建完毕的 workInProgress 树——顷刻间，原本后台构建的树摇身一变成为最新的 current 树；而原先退役的旧 current 树则沦为下一次渲染草稿本（Scratch space）以便重复利用内存空间。在图形学与游戏开发中，这种经典技术被称为**双缓存（Double Buffering）**：在后台缓冲区（Back Buffer）绘制完下一帧的所有画面，然后极速翻转（Flip）到前台屏幕。

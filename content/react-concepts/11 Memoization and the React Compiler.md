@@ -28,13 +28,13 @@ React 为什么要把这些组件函数挨个调用一遍？我们又有哪些�
 
 ```mermaid
 flowchart TD
-  A["渲染流程遍历到该 Fiber 节点"] --> B{"props 对象引用<br/>与上次完全相同？"}
-  B -->|否| R["调用组件函数执行渲染"]
-  B -->|是| C{"存在待处理更新或<br/>Context 发生变化？"}
-  C -->|是| R
-  C -->|否| D{"子树中存在待处理工作？"}
-  D -->|否| S["跳过整棵子树（Bailout）"]
-  D -->|是| W["跳过当前组件，继续向下遍历"]
+  A["fiber reached during render"] --> B{"same props object<br/>as last time?"}
+  B -->|no| R["call the component"]
+  B -->|yes| C{"pending update or<br/>changed context?"}
+  C -->|yes| R
+  C -->|no| D{"any work below?"}
+  D -->|no| S["skip the whole subtree"]
+  D -->|yes| W["skip this one, walk down"]
 ```
 
 第一道门槛就是：“这是否是字面意义上的同一个对象引用？”。然而，普通的 JSX 语法几乎不可能让父组件在重新渲染后将“同一个 props 对象引用”传递给子组件，因为每次渲染都会重新创建全新的元素对象。所以在默认机制下，**一次重新渲染会像瀑布一样级联穿透发生更新组件下方的整棵子树**。

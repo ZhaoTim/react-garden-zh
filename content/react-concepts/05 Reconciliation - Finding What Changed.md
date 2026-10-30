@@ -36,11 +36,11 @@ created: 2026-10-25T12:05:50.966Z
 
 ```mermaid
 flowchart TD
-  E["新元素（New element）"] --> K{"key 与旧 Fiber<br/>是否相同？"}
-  K -- 否 --> N["未匹配：<br/>在剩余节点中查找，或新建 Fiber"]
-  K -- 是 --> T{"类型（type）<br/>是否相同？"}
-  T -- 否 --> R["删除旧子树，<br/>创建全新 Fiber"]
-  T -- 是 --> U["复用 Fiber：<br/>更新 props，保留状态与 DOM"]
+  E["New element"] --> K{"Same key as<br/>the old fiber?"}
+  K -- no --> N["No match:<br/>look further, or create new"]
+  K -- yes --> T{"Same type?"}
+  T -- no --> R["Delete old subtree<br/>create new fiber"]
+  T -- yes --> U["Reuse fiber<br/>new props, state kept"]
 ```
 
 当新元素的 **key** 和 **type（组件或标签类型）** 同时与旧 Fiber 匹配时，React 就会执行**复用 Fiber（Reuse Fiber）**。此时，该 Fiber 会接收全新的 props，但它内部由 Hook 管理的内部状态（state）以及它所关联的真实 DOM 节点都会被原封不动地保留下来。

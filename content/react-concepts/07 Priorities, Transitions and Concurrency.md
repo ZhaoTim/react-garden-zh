@@ -33,12 +33,12 @@ React 完全能够做到这一点，但前提是你必须明确告诉它：究�
 
 ```mermaid
 flowchart LR
-  C["点击 / 按键输入<br/>(click / keydown)"] --> S["Sync Lane (同步赛道)"]
-  T["定时器 / 数据请求<br/>(timer / fetch)"] --> D["Default Lane (默认赛道)"]
-  ST["startTransition"] --> TR["Transition Lane (过渡赛道)"]
-  S --> M["微任务调度 (Microtask):<br/>立刻 Render + Commit"]
-  D --> Q["Scheduler 宏任务:<br/>一口气渲染完成，中途不让步"]
-  TR --> Y["Scheduler 宏任务:<br/>按 ~5ms 切片渲染，可随时中断让步"]
+  C["click / keydown"] --> S["Sync lane"]
+  T["timer / fetch"] --> D["Default lane"]
+  ST["startTransition"] --> TR["Transition lane"]
+  S --> M["microtask:<br/>render + commit now"]
+  D --> Q["Scheduler task:<br/>render without yielding"]
+  TR --> Y["Scheduler task:<br/>render in ~5 ms slices"]
 ```
 
 ## 紧急更新路径：同步更新（The urgent path: sync updates）
@@ -83,18 +83,18 @@ function App() {
 
 ```mermaid
 sequenceDiagram
-  participant U as 用户
-  participant R as React 运行时
-  participant B as 浏览器主线程
-  U->>R: 敲击字母 m
-  R->>B: Sync 紧急更新：输入框显示 m，提交 DOM
-  R->>R: Transition：渲染 m 的过滤列表，切片 1
-  R->>B: 耗时满 5ms，让出主线程
-  U->>R: 敲击字母 i
-  R->>R: 打断！果断丢弃未完成的 m 列表半成品
-  R->>B: Sync 紧急更新：输入框显示 mi，提交 DOM
-  R->>R: Transition：基于最新状态，重新切片渲染 mi 的列表
-  R->>B: 提交完整的 mi 过滤列表到 DOM
+  participant U as You
+  participant R as React
+  participant B as Browser
+  U->>R: type m
+  R->>B: Sync: input shows m, commit
+  R->>R: Transition: list for m, slice 1
+  R->>B: yield
+  U->>R: type i
+  R->>R: discard unfinished list for m
+  R->>B: Sync: input shows mi, commit
+  R->>R: Transition: list for mi, slices
+  R->>B: commit filtered list
 ```
 
 没有任何更新会在此过程中丢失。Transition 的更新对象自始至终保留在对应 Fiber 节点的更新队列（Update Queue）中，因此当重新启动渲染时，React 能够完整读取到所有的待处理更新，包括最新的 query。此外，**只有严格具有更高优先级的工作才能够打断 Transition**。例如，一个普通的 Default 级更新（如定时器回调）就无法插队，它会老老实实排队等待 Transition 渲染完成。

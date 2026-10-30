@@ -35,11 +35,11 @@ function Header({ count }) {
 
 ```mermaid
 flowchart TD
-    A["首次挂载<br/>root.render"] --> R[组件执行渲染]
-    B["自身状态更新<br/>setState、dispatch"] --> R
-    C[其父组件发生了渲染] --> R
-    D[其读取的 Context 发生变化] --> R
-    R --> K[继续对其子组件进行评估]
+    A["First mount<br/>root.render"] --> R[Component renders]
+    B["Its own state update<br/>setState, dispatch"] --> R
+    C[Its parent rendered] --> R
+    D[A context it reads changed] --> R
+    R --> K[Its children are considered next]
 ```
 
 **1. 首次挂载（The first mount）**：一切的起点是 `createRoot(container).render(<App />)`。React 首先调用根组件 `App`，随后递归调用其下方的每一个子组件，并在内存中完成首屏 DOM 结构的创建。
@@ -90,16 +90,16 @@ function List({ items }) {
 
 ```mermaid
 sequenceDiagram
-    participant U as 用户 (User)
-    participant R as React 核心
-    participant C as 组件树 (Components)
-    participant D as 真实 DOM
-    U->>R: 输入字母 "E"
-    R->>C: 渲染 App, Header, AddItem, List
-    C-->>R: 返回全新的元素描述
-    R->>R: 与上一次描述进行比对 (Diff)
-    R->>D: 提交 (Commit): 更新 input 的 value
-    Note over D: Header 对应的 <h1> 完全未被触碰
+    participant U as User
+    participant R as React
+    participant C as Components
+    participant D as DOM
+    U->>R: types E
+    R->>C: render App, Header, AddItem, List
+    C-->>R: fresh elements
+    R->>R: compare with last time
+    R->>D: commit: set input value
+    Note over D: Header's h1 untouched
 ```
 
 在**渲染阶段（Render）**，React 调用组件函数并比对新旧计算结果。在**提交阶段（Commit）**，React 仅将真实的差异部分应用到 DOM 上。在上面的例子中，`Header` 确实重新执行了渲染，但由于其返回的 `<h1>` 文本与上一次完全相同，因此在提交阶段，DOM 树上的 `<h1>` 节点完全没有受到任何打扰。

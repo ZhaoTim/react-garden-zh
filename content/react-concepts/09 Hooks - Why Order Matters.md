@@ -32,9 +32,9 @@ function App() {
 
 ```mermaid
 flowchart LR
-  F["App Fiber 节点<br/>memoizedState"] --> H1["Hook 1: useState<br/>state: items 列表<br/>queue: 待处理更新队列"]
-  H1 -->|next| H2["Hook 2: useState<br/>state: text 文本<br/>queue: 待处理更新队列"]
-  H2 -->|next| N["链表末尾 (null)"]
+  F["App fiber"] --> H1["Hook 1: useState<br/>state: items<br/>queue: pending updates"]
+  H1 -->|next| H2["Hook 2: useState<br/>state: text<br/>queue: pending updates"]
+  H2 -->|next| N["end of list"]
 ```
 
 这里既没有显式的索引下标变量，更没有任何基于名称映射的字典对象。React 在内部仅仅维护着一个轻量的“游标指针（Cursor）”，指向“当前正在处理的 Hook”；每当你调用一次 Hook，游标便顺着 `next` 指针向前推进一步。

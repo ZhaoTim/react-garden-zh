@@ -57,12 +57,12 @@ React 是如何跨越真实 DOM 与内部 Fiber 鸿沟的？答案非常巧妙�
 
 ```mermaid
 flowchart TD
-  T["button Fiber<br/>目标节点，存在 onClick"] -->|"父节点 (return)"| F["div Fiber<br/>检查 onClick？无"]
-  F -->|"父节点"| A["AddItem Fiber<br/>自定义组件，跳过"]
-  A -->|"父节点"| M["main Fiber"]
-  M -->|"父节点"| P["App Fiber<br/>自定义组件，跳过"]
-  P -->|"父节点"| R["根节点 (Root)"]
-  R --> L["处理函数调用列表<br/>目标节点优先，根节点排末位"]
+  T["button fiber<br/>target, onClick"] -->|"parent (return)"| F["div fiber<br/>onClick? none"]
+  F -->|parent| A["AddItem fiber<br/>component, skipped"]
+  A -->|parent| M["main fiber"]
+  M -->|parent| P["App fiber<br/>component, skipped"]
+  P -->|parent| R["root"]
+  R --> L["list of handlers<br/>target first, root last"]
 ```
 
 随后 React 开始遍历执行该列表。对于冒泡阶段（`onClick`），它会像原生冒泡一样从目标节点向根节点正向遍历执行。对于捕获阶段（`onClickCapture`），它则逆向执行同一份收集列表，即从根节点向目标节点推进。在 React 中，**捕获与冒泡完全是由 React 内部自行模拟计算出来的，而非直接照搬浏览器的原生机制**。
@@ -113,19 +113,19 @@ onAdd={() => {
 
 ```mermaid
 sequenceDiagram
-  participant B as 浏览器 (Browser)
-  participant R as 根节点监听器 (Root listener)
-  participant H as onAdd 处理函数
-  participant S as React 调度器 (Scheduler)
-  B->>R: 触发原生 click 事件
-  R->>R: 设定更新优先级为 Discrete (离散)
-  R->>H: 传入合成事件并调用处理函数
-  H->>S: setItems，分配 SyncLane，排入微任务
-  H->>S: setText，分配 SyncLane，微任务已就绪
-  R->>R: 恢复先前优先级，监听器函数返回
-  S->>S: 执行微任务：单次 Render 与单次 Commit 统一合并执行
-  S->>B: 真实 DOM 完成同步更新
-  B->>B: 浏览器执行像素绘制 (Paint)
+  participant B as Browser
+  participant R as Root listener
+  participant H as onAdd
+  participant S as React scheduler
+  B->>R: native click event
+  R->>R: set priority Discrete
+  R->>H: call handlers with synthetic event
+  H->>S: setItems, sync lane, queue microtask
+  H->>S: setText, sync lane, already queued
+  R->>R: restore priority, listener returns
+  S->>S: microtask runs one render and one commit
+  S->>B: DOM updated
+  B->>B: paint
 ```
 
 当根节点监听器执行完毕、当前 JavaScript 调用栈完全清空后，排在队首的微任务随即开始执行。同步车道（SyncLane）的工作无需等待任何宏任务调度器（Scheduler）：React 会在微任务内部一气呵成地执行 Render 与 Commit，将两次状态更新打包合并在**单次渲染**中统一处理。因为微任务会在浏览器获取绘制机会之前执行，所以用户绝对不会目睹“列表已经刷新、而输入框内容依然残留”的中间撕裂态。关于本次渲染过程的详细推演参见 [[04 State Updates - Snapshots and Batching|第 04 篇 · 状态更新：快照与批处理]]，而从事件触发到像素上屏的完整端到端旅程将在 [[12 A Click, Start to Finish|第 12 篇 · 完整穿透：一次点击从事件触发到像素绘制]] 中全景展开。

@@ -45,29 +45,29 @@ function List({ items, onToggle }) {
 
 ```mermaid
 sequenceDiagram
-  participant U as 用户 (User)
-  participant B as 浏览器 (Browser)
-  participant L as 根节点监听器 (Root listener)
-  participant H as onAdd 处理函数
-  participant Q as 更新队列 (Update queues)
-  participant W as 渲染工作循环 (Render work loop)
-  participant C as 提交阶段 (Commit)
-  U->>B: 点击 Add 按钮
-  B->>L: 原生 click 事件冒泡至根容器
-  L->>L: 标记离散优先级，定位 Fiber，收集 onClick
-  L->>H: 传入合成事件并调用 onAdd
-  H->>Q: setItems，分配同步车道，调度微任务
-  H->>Q: setText，分配同步车道，微任务已调度
-  L->>L: 恢复原优先级，监听器执行完毕返回
-  Q->>W: 微任务启动同步渲染
-  W->>W: 根节点跳过(Bailout)，App 执行渲染
-  W->>W: Header、AddItem、List 及 Item 依次渲染
-  W->>W: Key 匹配到 Milk，判断 Eggs 为新增节点
-  W->>C: 提交完成态 Fiber 树
-  C->>B: 插入 li、更新文本、清空输入框
-  C->>C: 切换双缓存树，Layout effect 滚动列表
-  C->>C: useEffect 执行，持久化至 localStorage
-  B->>U: 浏览器绘制像素 (Paint)
+  participant U as User
+  participant B as Browser
+  participant L as Root listener
+  participant H as onAdd handler
+  participant Q as Update queues
+  participant W as Render work loop
+  participant C as Commit
+  U->>B: click Add
+  B->>L: native click bubbles to the root
+  L->>L: priority Discrete, find fiber, collect onClick
+  L->>H: call onAdd with synthetic event
+  H->>Q: setItems, sync lane, schedule microtask
+  H->>Q: setText, sync lane, already scheduled
+  L->>L: restore priority, listener returns
+  Q->>W: microtask starts a sync render
+  W->>W: root bails out, App renders
+  W->>W: Header, AddItem, List, Items render
+  W->>W: keys match Milk, Eggs is new
+  W->>C: finished tree
+  C->>B: insert li, update texts, clear input
+  C->>C: swap trees, layout effect scrolls list
+  C->>C: useEffect saves to localStorage
+  B->>U: paint
 ```
 
 ## 点击发生前：已就绪的运行环境（Before the click: what's already in place）
@@ -183,15 +183,15 @@ React 注册的微任务开始执行：它检查根节点，发现存在属于�
 
 ```mermaid
 flowchart LR
-  A["点击 Add 按钮"] --> B["根节点监听器<br/>标记离散优先级"]
-  B --> C["执行 onAdd<br/>两次更新推入队列"]
-  C --> D["触发微任务<br/>启动同步渲染"]
-  D --> E["根节点跳过<br/>App 执行渲染"]
-  E --> F["子组件依次渲染<br/>Key 协调比对"]
-  F --> G["提交阶段<br/>DOM 真实突变"]
-  G --> H["执行 Layout Effects"]
-  H --> I["执行被动副作用<br/>离散事件中同步清空"]
-  I --> J["浏览器绘制像素 (Paint)"]
+  A["click on Add"] --> B["root listener<br/>Discrete priority"]
+  B --> C["onAdd<br/>two updates queued"]
+  C --> D["microtask<br/>sync render"]
+  D --> E["root bails out<br/>App renders"]
+  E --> F["children render<br/>keys reconciled"]
+  F --> G["commit<br/>DOM mutations"]
+  G --> H["layout effects"]
+  H --> I["passive effects<br/>sync for a click"]
+  I --> J["paint"]
 ```
 
 > [!tip] 核心心智模型（Mental Model）

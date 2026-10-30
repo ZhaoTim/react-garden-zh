@@ -43,12 +43,12 @@ created: 2026-10-27T09:51:45.111Z
 
 ```mermaid
 flowchart LR
-    I["核心思想<br/>UI = f(state)、元素描述"] --> R["Render 阶段<br/>调用组件函数"]
-    S["状态更新<br/>快照、批处理"] --> R
-    R --> D["Reconcile 阶段<br/>Diff 协调、Fiber、优先级"]
-    D --> C["Commit 阶段<br/>真实 DOM 变更、执行 Effects"]
-    C --> E["事件与 Hooks<br/>用户交互触发"]
+    I["Ideas<br/>UI = f(state), elements"] --> R["Render<br/>call components"]
+    S["State update<br/>snapshots, batching"] --> R
+    R --> D["Reconcile<br/>diff, fiber, priorities"]
+    D --> C["Commit<br/>DOM, effects"]
+    C --> E["Events and hooks<br/>user acts"]
     E -->|setState| S
-    C -.-> M["Memoization<br/>跳过不必要的重复计算"]
+    C -.-> M["Memoization<br/>skip work"]
     M -.-> R
 ```
