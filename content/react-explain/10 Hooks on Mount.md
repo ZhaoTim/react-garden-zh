@@ -1,30 +1,31 @@
 ---
 tags: [react, react-internals, hooks]
-aliases: [Hooks on Mount]
+aliases: [Hooks on Mount, Hooks 挂载阶段]
 react-version: 19.3.1
 created: 2026-10-25T11:55:39.401Z
+description: 深度解析 React 函数组件首次渲染时的 Hooks 机制：HooksDispatcherOnMount 分发器、Hook 单向链表构建、useState 与 useEffect 等核心 Hook 的初始化原理，以及为什么会有 Hooks 规则。
 ---
 
-# Hooks on Mount
+# Hooks 挂载阶段：链表构建与状态初始化
 
-> [!summary] TL;DR
-> A function component's first render runs inside `renderWithHooks`. It points the global hooks dispatcher (`ReactSharedInternals.H`) at the **mount** implementations, then calls your function. Each `useState`/`useEffect`/`useMemo`/`useRef` call appends one `Hook` object to a singly linked list hanging off `fiber.memoizedState`. Effects also go on a separate circular list in `fiber.updateQueue`. No names or keys are stored anywhere. A hook's identity is its **position** in the list, and that's the whole reason the rules of hooks exist.
+> [!summary] 核心速览（TL;DR）
+> 函数组件的首次渲染是在 `renderWithHooks` 函数中执行的。它首先将全局 Hooks 分发器（`ReactSharedInternals.H`）指向专用于**挂载阶段**的实现（`HooksDispatcherOnMount`），随后调用你的组件函数。在组件函数内部，每一次对 `useState`、`useEffect`、`useMemo` 或 `useRef` 的调用，都会在挂载于 `fiber.memoizedState` 的 **Hook 单向链表**尾部追加一个 `Hook` 对象。与此同时，副作用（Effects）还会被单独挂载到 `fiber.updateQueue` 的环形链表中。在整个底层数据结构中，React 根本没有为 Hook 记录任何名称（name）或键值（key）——每个 Hook 的唯一标识就是它在链表中的**相对物理位置**。这就是为什么必须严格遵守 Hooks 使用规则（Rules of Hooks）的根本底层原因。
 
-Where we are: [[07 beginWork and Reconciliation|beginWork]] reached a `FunctionComponent` fiber with `current === null` (first mount) and called `updateFunctionComponent`, which calls `renderWithHooks`.[^ufc] Everything below happens *inside your component's function call*, during the [[06 The Work Loop - Render Phase|render phase]].
+当前执行上下文：在 [[06 The Work Loop - Render Phase|工作循环（Render 渲染阶段）]] 中，[[07 beginWork and Reconciliation|beginWork 与协调]] 遍历到了一个 `current === null` 的函数组件（`FunctionComponent`）Fiber 节点（即首次挂载），随即调用 `updateFunctionComponent`，进而进入 `renderWithHooks` 函数。[^ufc] 本篇所讨论的所有底层细节，均发生在**你的组件函数被调用的那段执行期间**。
 
-## 1. `renderWithHooks`: setting the stage
+## 1. `renderWithHooks`：搭好舞台
 
-`useState` in the `react` package does almost nothing. It reads `ReactSharedInternals.H` and forwards the call to it.[^resolve][^usestate] The `react` package has no hooks logic of its own. The renderer (`react-reconciler`) installs a *dispatcher* object before it calls your component and removes it afterwards. See [[01 Bootstrap - Packages, JSX and the Dispatcher|Bootstrap]] for why it's split this way: one `react` package can serve DOM, Native and test renderers.
+`react` 核心包中的 `useState` 自身几乎不包含任何实质逻辑。它仅仅是读取 `ReactSharedInternals.H` 并直接将函数调用转发给它。[^resolve][^usestate] 整个 `react` 包根本没有任何关于 Hooks 的具体实现算法；真正的协调器（`react-reconciler`）会在调用你的组件函数之前，动态注入一个分发器（Dispatcher）对象，并在组件执行完毕后立即将其卸载。至于为什么要进行这样的职责拆分，参见 [[01 Bootstrap - Packages, JSX and the Dispatcher|01 · 初始化引导]]：这样可以保证同一套轻量级 `react` API 包无缝驱动 DOM（Web）、Native（移动端）以及自动化测试等不同的渲染器。
 
-`renderWithHooks` does five things (simplified):[^rwh]
+`renderWithHooks` 在底层主要完成以下五件事（简化版代码如下）：[^rwh]
 
 ```js
 export function renderWithHooks(current, workInProgress, Component, props, secondArg, nextRenderLanes) {
   renderLanes = nextRenderLanes;
-  currentlyRenderingFiber = workInProgress;          // module-level "who am I rendering"
+  currentlyRenderingFiber = workInProgress;          // 模块级全局游标：“当前正在渲染哪个 Fiber”
 
-  workInProgress.memoizedState = null;               // hook list will be rebuilt
-  workInProgress.updateQueue = null;                 // effect list will be rebuilt
+  workInProgress.memoizedState = null;               // 重置 Hook 链表，准备在执行中全新构建
+  workInProgress.updateQueue = null;                 // 重置 Effect 链表
   workInProgress.lanes = NoLanes;
 
   ReactSharedInternals.H =
@@ -32,21 +33,21 @@ export function renderWithHooks(current, workInProgress, Component, props, secon
       ? HooksDispatcherOnMount
       : HooksDispatcherOnUpdate;
 
-  let children = Component(props, secondArg);        // <-- your code runs here
+  let children = Component(props, secondArg);        // <-- 你的组件代码在此处被调用执行
   if (didScheduleRenderPhaseUpdateDuringThisPass) {
-    children = renderWithHooksAgain(/* ... */);      // setState during render → loop
+    children = renderWithHooksAgain(/* ... */);      // 渲染阶段调用了 setState → 循环重新渲染
   }
-  // DEV + StrictMode: renderWithHooksAgain() once more (double render)
+  // DEV + StrictMode：执行 renderWithHooksAgain() 再渲染一次（双重渲染）
   finishRenderingHooks(current, workInProgress, Component);
   return children;
 }
 ```
 
-The dispatcher decision is `current === null || current.memoizedState === null`. The second half of that condition matters. A fiber can have a `current` and still hold no hooks state, for example a component that suspended before it ever committed hooks. React treats that as a mount too. In DEV there is a third variant, `HooksDispatcherOnMountWithHookTypesInDEV`, which helps produce the "change in the order of Hooks" warning.[^rwh]
+判定采用哪个分发器的核心条件是 `current === null || current.memoizedState === null`。这个条件的后半部分至关重要：一个 Fiber 节点可能已经存在对应的 `current`（即之前经历过渲染流程），但其内部却未曾提交过任何 Hook 状态——典型场景是在提交 Hooks 之前就已经因 Suspense 而挂起（Suspend）的组件。对于这种情况，React 依然将其视同首次挂载处理。在 DEV 开发环境下，React 还提供了第三种分发器变体 `HooksDispatcherOnMountWithHookTypesInDEV`，用于在开发阶段检测 Hook 调用顺序发生变更时给出精准警告。[^rwh]
 
-The two dispatchers are plain object literals that map each public hook to an implementation.[^dmount][^dupdate]
+这两个分发器本质上都是普通的对象字面量，负责将对外暴露的公共 Hook API 映射到内部的具体实现函数：[^dmount][^dupdate]
 
-| Public hook | Mount | Update |
+| 公共 Hook API | 挂载阶段（Mount） | 更新阶段（Update） |
 |---|---|---|
 | `useState` | `mountState` | `updateState` → `updateReducer` |
 | `useReducer` | `mountReducer` | `updateReducer` |
@@ -55,40 +56,40 @@ The two dispatchers are plain object literals that map each public hook to an im
 | `useRef` | `mountRef` | `updateRef` |
 | `useContext` | `readContext` | `readContext` |
 | `use` | `use` | `use` |
-| `useMemoCache` (compiler) | `useMemoCache` | `useMemoCache` |
+| `useMemoCache` (编译器) | `useMemoCache` | `useMemoCache` |
 
-The last three rows are the same function in both columns, and that's a clue. They don't take a slot in the hook list (more on this below).
+注意最后三行：无论挂载阶段还是更新阶段，它们映射的都是同一个底层函数。这是一个非常重要的内部信号——它们完全不占用 Hook 链表中的节点槽位（下文会详细剖析）。
 
-After your function returns, `finishRenderingHooks` sets the dispatcher to `ContextOnlyDispatcher`. Every hook in that dispatcher is `throwInvalidHookError`.[^finish][^ctxonly] That's why calling `useState` inside an event handler or a `setTimeout` throws "Invalid hook call". It's not a lint rule. Outside a render, the dispatcher really is a minefield. `finishRenderingHooks` also checks `currentHook !== null && currentHook.next !== null` and throws *"Rendered fewer hooks than expected"* if you returned early.[^finish]
+在你的组件函数返回之后，`finishRenderingHooks` 会将分发器切换为 `ContextOnlyDispatcher`。该分发器中的每一个 Hook 方法都会直接抛出 `throwInvalidHookError`。[^finish][^ctxonly] 这就是为什么在事件处理函数或 `setTimeout` 异步回调中调用 `useState` 会直接抛出著名的 *"Invalid hook call"*（无效的 Hook 调用）报错。这绝非 ESLint 静态代码检查的约束，而是因为在渲染阶段之外，运行时的分发器本身就是一个碰之即炸的雷区。此外，`finishRenderingHooks` 还会校验 `currentHook !== null && currentHook.next !== null`，如果你在某个条件分支中提前 `return`，导致执行的 Hook 数量少于上一次渲染，React 会立即抛出 *"Rendered fewer hooks than expected"* 运行时异常。[^finish]
 
-## 2. The Hook object and the list
+## 2. Hook 数据对象与单向链表
 
 ```js
 export type Hook = {
-  memoizedState: any,          // what this hook "is": state value, effect object, [value, deps], ref...
-  baseState: any,              // state before the first skipped update (see page 11)
-  baseQueue: Update<any, any> | null, // updates skipped in a previous render, still to apply
-  queue: any,                  // UpdateQueue for state/reducer hooks, null otherwise
-  next: Hook | null,
+  memoizedState: any,          // Hook 实际保存的当前状态数据：state 值、Effect 对象、[value, deps]、ref 等
+  baseState: any,              // 遭遇第一个被跳过的更新之前的基准状态（详见第 11 篇）
+  baseQueue: Update<any, any> | null, // 之前渲染被跳过、仍需继续累加应用的更新链表
+  queue: any,                  // 状态更新队列（仅 useState/useReducer 具备，其余 Hook 为 null）
+  next: Hook | null,           // 指向链表中下一个 Hook 节点的单向指针
 };
 ```
 [^hooktype]
 
-`mountWorkInProgressHook` allocates one of these and links it onto the end of the list:[^mwih]
+`mountWorkInProgressHook`（创建并链入当前 Hook 节点）负责分配一个新的 `Hook` 对象，并将其追加到链表末尾：[^mwih]
 
 ```js
 function mountWorkInProgressHook(): Hook {
   const hook = { memoizedState: null, baseState: null, baseQueue: null, queue: null, next: null };
   if (workInProgressHook === null) {
-    currentlyRenderingFiber.memoizedState = workInProgressHook = hook; // first hook
+    currentlyRenderingFiber.memoizedState = workInProgressHook = hook; // 首个 Hook 节点
   } else {
-    workInProgressHook = workInProgressHook.next = hook;               // append
+    workInProgressHook = workInProgressHook.next = hook;               // 追加到链表尾部
   }
   return workInProgressHook;
 }
 ```
 
-`workInProgressHook` is a module-level cursor, so the file has no `index` variable at all. For a component like this:
+`workInProgressHook` 是一个定义在模块顶层的全局游标指针，所以在整个源码文件中根本不存在任何所谓的 `index` 数组索引变量。对于如下组件：
 
 ```js
 function Counter() {
@@ -100,7 +101,7 @@ function Counter() {
 }
 ```
 
-the fiber ends up looking like this:
+该 Fiber 节点在内存中的完整数据拓扑结构如下：
 
 ```mermaid
 flowchart LR
@@ -112,55 +113,55 @@ flowchart LR
   H3 -.same object.-> E1
 ```
 
-> [!note] `memoizedState` means two different things
-> On a **class** fiber, `fiber.memoizedState` is the state object. On a **function** fiber, it's the head of the hook list. Same field, different shape. That's why the [[05 The Fiber Data Structure|Fiber]] type annotates it as `any`.
+> [!note] `memoizedState` 字段在不同场景下的双重含义
+> 在**类组件**（Class Component）对应的 Fiber 节点上，`fiber.memoizedState` 存储的是类实例的 `state` 状态对象；而在**函数组件**（Function Component）的 Fiber 节点上，它则存放着整个 Hook 单向链表的**头节点（Head）**。同一个字段，承载着截然不同的数据结构。这也正是为什么在 [[05 The Fiber Data Structure|Fiber 数据结构]] 的类型定义中，`memoizedState` 被声明为 `any` 的原因。
 
-## 3. `useState` / `useReducer`: the queue and the bound dispatch
+## 3. `useState` 与 `useReducer`：更新队列与绑定的 dispatch
 
-`mountState` calls `mountStateImpl`, which (simplified):[^mountstateimpl][^mountstate]
+`mountState` 会调用内部的 `mountStateImpl`，其核心执行逻辑如下（简化版）：[^mountstateimpl][^mountstate]
 
 ```js
 const hook = mountWorkInProgressHook();
 if (typeof initialState === 'function') {
-  initialState = initialState();               // lazy initializer, only on mount
-  // DEV StrictMode: call it a second time and throw the result away
+  initialState = initialState();               // 惰性初始化函数，仅在挂载时执行一次
+  // DEV StrictMode：在开发环境下会再次调用以检验纯度，并丢弃二次执行的结果
 }
 hook.memoizedState = hook.baseState = initialState;
 const queue = {
-  pending: null,                    // circular list of not-yet-processed updates
-  lanes: NoLanes,                   // for transition entanglement
+  pending: null,                    // 待处理更新构成的单向环形链表
+  lanes: NoLanes,                   // 用于 Transition 优先级纠缠
   dispatch: null,
   lastRenderedReducer: basicStateReducer,
-  lastRenderedState: initialState,  // used by the eager-state bailout in setState
+  lastRenderedState: initialState,  // 用于 setState 时的急切计算跳过（Eager Bailout）判定
 };
 hook.queue = queue;
-// mountState:
+// mountState 阶段绑定分发函数：
 const dispatch = dispatchSetState.bind(null, currentlyRenderingFiber, queue);
 queue.dispatch = dispatch;
 return [hook.memoizedState, dispatch];
 ```
 
-Three things are worth internalising:
+以下三点设计思想非常值得深入理解与内化：
 
-1. **`setState` is a bound function.** It closes over the *fiber* and the *queue*, not the component instance or a hook index. When you call it later from an event handler, React already knows where the update goes, without a tree search. See [[12 setState - dispatchSetState and Batching|setState]].
-2. **The setter is stable.** It's created once on mount and stored on `queue.dispatch`. The update path just returns `queue.dispatch`.[^uri] That's why leaving `setCount` out of effect deps is safe.
-3. **`useState` is `useReducer` with a built-in reducer.** `basicStateReducer` is `typeof action === 'function' ? action(state) : action`.[^bsr] `mountReducer` is the same code with your reducer and an optional `init(initialArg)`. Its dispatch is bound to `dispatchReducerAction` instead.[^mountreducer] The one behavioural difference: `dispatchReducerAction` doesn't try the eager-state bailout, because your reducer could change between renders.[^dra]
+1. **`setState` 是一个预先绑定的函数（Bound Function）。** 它通过闭包直接固化了目标 *Fiber* 节点与更新队列 *queue*，而不是绑定在组件实例或某个数组索引上。后续当你在事件处理回调中调用它时，React 根本无需遍历组件树去查找目标是谁，就已经精准锁定了这次状态更新应该归属的 Fiber 节点和队列。详见 [[12 setState - dispatchSetState and Batching|12 · setState 底层实现]]。
+2. **Setter 函数具有天然的引用稳定性（Stable Identity）。** 它在首次挂载时被创建一次并缓存在 `queue.dispatch` 上。后续所有的更新渲染路径，都只是直接从 `queue.dispatch` 读取并返回它。[^uri] 这就是为什么在 `useEffect` 的依赖数组中省略 `setCount` 永远是绝对安全的。
+3. **`useState` 本质上就是内置了基础 Reducer 的 `useReducer`。** React 内部使用的 `basicStateReducer` 实现极其简单：`typeof action === 'function' ? action(state) : action`。[^bsr] `mountReducer` 的执行逻辑与 `mountState` 如出一辙，只不过把内置 Reducer 替换为了你自定义传入的 reducer 以及可选的 `init(initialArg)` 初始化函数，其 dispatch 绑定的是 `dispatchReducerAction`。[^mountreducer] 两者唯一的行为差异在于：`dispatchReducerAction` 默认不会尝试“急切状态预判跳过”（Eager-state bailout），因为用户传入的 reducer 逻辑可能会在不同渲染之间发生变动。[^dra]
 
-> [!warning] `fiber` in the bound dispatch may be the "wrong" twin
-> `currentlyRenderingFiber` at mount is the work-in-progress fiber, which becomes `current` once it commits. After a few updates, the bound fiber may be either side of the `current`/`alternate` pair. React copes with this by marking lanes on **both** the fiber and its alternate when you dispatch (see [[12 setState - dispatchSetState and Batching|setState]]).
+> [!warning] 绑定分发函数中的 `fiber` 可能会是双缓存镜像中的“另一半”
+> 在初次挂载时，`currentlyRenderingFiber` 是正在构建中的 `workInProgress` Fiber，它在提交后会变为 `current`。但在经历了数轮更新之后，dispatch 闭包中固化的那个 fiber 引用可能是双缓存 `current`/`alternate` 对中的任意一边。React 优雅地解决了这个问题：当你在 dispatch 中触发更新时，React 会**同时**在当前 Fiber 及其 `alternate` 镜像节点上标记优先级 Lanes（详见 [[12 setState - dispatchSetState and Batching|12 · setState 底层实现]]）。
 
-## 4. `useEffect`: effect objects and flags
+## 4. `useEffect`：Effect 对象与双层标志位
 
-`mountEffect` calls `mountEffectImpl(PassiveEffect | PassiveStaticEffect, HookPassive, create, deps)`. In DEV StrictMode it also adds `MountPassiveDevEffect`.[^mounteffect]
+`mountEffect` 底层会调用 `mountEffectImpl(PassiveEffect | PassiveStaticEffect, HookPassive, create, deps)`。在开发模式的 StrictMode 下，还会额外附加 `MountPassiveDevEffect` 标志。[^mounteffect]
 
 ```js
 function mountEffectImpl(fiberFlags, hookFlags, create, deps) {
   const hook = mountWorkInProgressHook();
   const nextDeps = deps === undefined ? null : deps;
-  currentlyRenderingFiber.flags |= fiberFlags;          // "this fiber has passive work"
+  currentlyRenderingFiber.flags |= fiberFlags;          // “该 Fiber 节点包含待执行的被动副作用（Passive Work）”
   hook.memoizedState = pushSimpleEffect(
-    HookHasEffect | hookFlags,                          // always fires on mount
-    createEffectInstance(),                             // { destroy: undefined }
+    HookHasEffect | hookFlags,                          // 挂载时必然包含 HookHasEffect，确保在初次挂载时执行
+    createEffectInstance(),                             // 构造实例容器：{ destroy: undefined }
     create,
     nextDeps,
   );
@@ -168,73 +169,79 @@ function mountEffectImpl(fiberFlags, hookFlags, create, deps) {
 ```
 [^mounteffectimpl]
 
-There are two levels of flags here, and it's easy to mix them up:
+这里的标志位设计分为两个层级，开发者极易混淆：
 
-- **Fiber flags** (`PassiveEffect`) on `fiber.flags`. These bubble up as `subtreeFlags` in [[08 completeWork - Building DOM Nodes|completeWork]], so the [[09 Commit Phase - Mutation, Layout, Passive Effects|commit phase]] can skip whole subtrees that have nothing to do.
-- **Hook effect tags** (`HasEffect = 0b0001`, `Insertion = 0b0010`, `Layout = 0b0100`, `Passive = 0b1000`) on each `Effect.tag`.[^hooktags] At commit time, `commitHookEffectListMount(HookPassive | HookHasEffect, fiber)` walks the effect ring and runs only the effects whose tag contains *all* of those bits.[^chelm]
+- **Fiber 节点级标志位（Fiber flags）**：保存在 `fiber.flags` 上（如 `PassiveEffect`）。这些标志位会在 [[08 completeWork - Building DOM Nodes|completeWork]] 自底向上归并阶段汇聚冒泡为 `subtreeFlags`，从而使 [[09 Commit Phase - Mutation, Layout, Passive Effects|Commit 提交阶段]] 能够通过掩码快速跳过那些完全没有副作用的整棵子树。
+- **Hook 级别的副作用标签（Hook effect tags）**：保存在具体 `Effect.tag` 字段中（例如二进制位 `HasEffect = 0b0001`、`Insertion = 0b0010`、`Layout = 0b0100`、`Passive = 0b1000`）。[^hooktags] 在 Commit 阶段，`commitHookEffectListMount(HookPassive | HookHasEffect, fiber)` 会遍历该 Fiber 上的 Effect 环形链表，且仅执行那些标签**完整匹配这组二进制位掩码**的 Effect。[^chelm]
 
-`pushSimpleEffect` builds `{tag, create, deps, inst, next}` and `pushEffectImpl` appends it to a **circular** list on `fiber.updateQueue.lastEffect`, creating the `FunctionComponentUpdateQueue` (`{lastEffect, events, stores, memoCache}`) lazily.[^pushsimple][^pusheffectimpl][^fcuq] The list is circular with a pointer to the *last* element, so append is O(1) and `lastEffect.next` is the head. React uses this trick all over (update queues too).
+`pushSimpleEffect` 负责构建 `{tag, create, deps, inst, next}` 结构体，而 `pushEffectImpl` 则会以**惰性初始化**的方式创建 `FunctionComponentUpdateQueue`（包含 `{lastEffect, events, stores, memoCache}`），并将新建的 Effect 追加到 `fiber.updateQueue.lastEffect` 构成的**单向环形链表**中。[^pushsimple][^pusheffectimpl][^fcuq] 这种环形链表的设计极其巧妙：由指针直接指向链表的*最后一个元素*（尾节点），因此追加新节点的操作复杂度恒为 $O(1)$，同时 `lastEffect.next` 即刻就能索引到链表头部。React 在全套架构中随处都在使用这个技巧（包括状态更新队列 `UpdateQueue` 亦是如此）。
 
-So each effect lives in two places. The hook's `memoizedState` points at the Effect object, so the next render can read the previous `deps`. The fiber's `updateQueue` ring is what the commit phase iterates. The `inst` object (`{destroy}`) is shared across renders for the effect's whole lifetime. That's where the cleanup function returned by your effect is stored.[^effecttype]
+因此，每一个 Effect 实际上在底层存在**双重存储位置**：
+1. Hook 节点自身的 `memoizedState` 指向对应的 Effect 对象，以便下一轮渲染阶段能够比对上一轮保存的依赖项 `deps`；
+2. Fiber 节点的 `updateQueue` 环形链表则是 Commit 阶段集中遍历和执行副作用的专用队列。
 
-`useLayoutEffect` and `useInsertionEffect` take the same path with `HookLayout`/`UpdateEffect` and `HookInsertion` respectively. Only the timing differs, and the commit phase owns the timing.
+而其中的 `inst` 容器对象（结构为 `{destroy}`）在组件整个生命周期中跨渲染共享，你的 Effect 回调执行后返回的清理函数（cleanup）就存放在这里。[^effecttype]
 
-## 5. `useRef`, `useMemo`, `useCallback`
+`useLayoutEffect` 与 `useInsertionEffect` 完全遵循相同的执行流，仅在传入的标志位上分别对应为 `HookLayout` / `UpdateEffect` 以及 `HookInsertion`。三者唯一的区别在于执行时机的不同，而这一执行时机完全由 Commit 阶段掌控。
 
-These are almost boring, which is the point:
+## 5. `useRef`、`useMemo` 与 `useCallback`
+
+这些 Hook 的底层实现甚至显得有些“平淡无奇”，但这恰恰体现了其设计的精炼：
 
 ```js
 function mountRef(initialValue) {
   const hook = mountWorkInProgressHook();
   const ref = { current: initialValue };
-  hook.memoizedState = ref;      // the same object forever; updateRef just returns it
+  hook.memoizedState = ref;      // 该对象引用终生不变；updateRef 只是直接返回它
   return ref;
 }
 ```
 [^mountref][^updateref]
 
-`mountMemo` calls `nextCreate()` and stores `[nextValue, nextDeps]`. In StrictMode DEV it calls `nextCreate()` a second time to surface impure factories.[^mountmemo] `mountCallback` stores `[callback, nextDeps]` *without calling anything*.[^mountcb] `useCallback(fn, deps)` really is `useMemo(() => fn, deps)` minus one closure.
+`mountMemo` 会立即执行工厂函数 `nextCreate()`，并将计算结果及其依赖项打包为 `[nextValue, nextDeps]` 存入 `memoizedState`。在开发模式的 StrictMode 下，它会额外执行第二次 `nextCreate()`，以主动暴露那些非纯函数工厂产生的副作用。[^mountmemo]
 
-> [!tip] A ref is just a hook slot holding a mutable object
-> Writing `ref.current` doesn't schedule anything. No queue, no lanes, no fiber is involved. That's exactly why refs are the escape hatch for "values that shouldn't cause a render", and also why reading `ref.current` during render is fragile under concurrent rendering. A render that gets thrown away can still have mutated it.
+而 `mountCallback` 则直接存储 `[callback, nextDeps]`，**中途绝不会执行该函数**。[^mountcb] 换句话说，`useCallback(fn, deps)` 在底层本质上就是省去了一层闭包调用的 `useMemo(() => fn, deps)`。
 
-## 6. Hooks that don't take a slot: `useContext`, `use`, `useMemoCache`
+> [!tip] Ref 的本质：一个仅仅持有可变普通对象的 Hook 槽位
+> 修改 `ref.current` 的值不会触发任何重新调度。这其中完全没有队列、没有优先级 Lanes、更没有 Fiber 树的参与。这正是为什么 Ref 能够成为“更新时无需引起重新渲染的数据”的逃生通道；但这也正是为什么在并发渲染（Concurrent Rendering）模式下，在渲染期间直接读取 `ref.current` 会极度脆弱的根源——因为一轮被中止或丢弃的无用渲染，可能已经不可逆地篡改了该 Ref 上的可变数据。
 
-**`useContext`** is `readContext` in both dispatchers.[^dmount] `readContext` reads `context._currentValue` (pushed by the nearest Provider during beginWork). It then appends a `{context, memoizedValue, next}` item to `fiber.dependencies`. It never calls `mountWorkInProgressHook`.[^readctx][^readctxconsumer] Context dependencies are a separate list that context propagation scans when a Provider's value changes. A consequence: `useContext` doesn't strictly need a stable call order. The *rule* still applies to it for consistency and future-proofing, but the implementation would survive a conditional `useContext`.
+## 6. 不占用 Hook 链表槽位的特殊 Hooks：`useContext`、`use` 与 `useMemoCache`
 
-**`use(usable)`**: for a thenable it calls `useThenable`, which uses its own counter (`thenableIndexCounter`) into a `thenableState` array instead of the hook list. For a context it calls `readContext`.[^use][^usethenable] That's why `use` is the one hook you may call inside `if` and loops: it's indexed by *how many thenables you've awaited so far*, and that's reset on replay. One subtle bit: if a component suspends on `use` before it reaches any hooks, `useThenable` re-picks the mount vs update dispatcher for the hooks that come after it. A replay may then see an empty WIP list.[^usethenable]
+**`useContext`**：在挂载分发器和更新分发器中，其映射的都是同一个底层函数 `readContext`。[^dmount] `readContext` 会读取目标 `context._currentValue`（该值在 beginWork 阶段由距离最近的 Context Provider 压入）。随后，它会在当前 Fiber 节点的 `fiber.dependencies` 链表尾部追加一个 `{context, memoizedValue, next}` 节点。它**自始至终绝不会调用 `mountWorkInProgressHook`**。[^readctx][^readctxconsumer] Context 的依赖项存放在一个独立的专用链表中，当 Provider 的 value 发生变更时，Context 传播算法会专门扫描这个列表。这带来了一个鲜为人知的结论：从纯运行时的角度来看，`useContext` 并不严格依赖调用顺序的稳定性。官方之所以依然将 Hooks 规则应用在它身上，主要是为了保持 API 心智模型的高度一致性以及前向兼容；但实际上，就算你把 `useContext` 写在条件分支里，其底层实现也完全不会导致 Hook 链表错位。
 
-## 7. Why the rules of hooks exist
+**`use(usable)`**：如果传入的是 Promise 等 Thenable 对象，底层会调用 `useThenable`。它依靠自身独立的游标计数器（`thenableIndexCounter`）在 `thenableState` 数组中索引位置，而根本不走 Hook 链表。如果传入的是 Context，则直接调用 `readContext`。[^use][^usethenable] 这正是为什么 `use` 是 React 中**唯一允许在 `if` 条件分支和循环语句中调用的 Hook**：它的索引规则是*“当前组件到目前为止 await 了多少个 thenable”*，并在重试重放（Replay）时自动归零重置。这里还有一个幽微的细节：如果一个组件在执行到任何标准 Hook 之前就因为 `use` 发生了挂起（Suspend），`useThenable` 会在重放时为后续的 Hooks 重新裁决是采用 Mount 还是 Update 分发器，从而妥善应对 WIP 链表尚为空的边界状态。[^usethenable]
 
-Put the pieces together. On update, `updateWorkInProgressHook` doesn't look up "the `count` state". It takes `currentHook.next`, the next node in the *previous* render's list, and clones it.[^uwih] The *n*-th hook call in this render is paired with the *n*-th node from the last committed render. That's all there is to it.
+## 7. 深入本质：为什么必须存在 Hooks 使用规则？
+
+串联起所有的底层碎片：在组件更新阶段，`updateWorkInProgressHook` 绝不会通过字符串或键名去查找所谓的“`count` 状态”。它只是单纯地取出 `currentHook.next`——也就是**上一次渲染**所构建链表中的下一个节点，并将其实例克隆过来。[^uwih] 当前渲染中的第 $n$ 次 Hook 调用，只会机械地与上一次已提交渲染中的第 $n$ 个链表节点配对。这就是底层全部的真相。
 
 ```js
 function Bad({ show }) {
-  if (show) useState('a');     // hook #1 only when show
-  const [n] = useState(0);     // hook #1 or #2 depending on show!
+  if (show) useState('a');     // 仅当 show 为 true 时才作为第 1 个 Hook 执行
+  const [n] = useState(0);     // 依据 show 的状态，它有时是第 1 个，有时是第 2 个！
 }
 ```
 
-When `show` flips from `true` to `false`, `useState(0)` gets paired with the node that held `'a'`, so it returns `'a'`. If the kinds differ (say an effect node gets reused for state), the queue is `null` and you get *"Should have a queue. You are likely calling Hooks conditionally"*.[^uri] If the new render calls *more* hooks than the old list has, `updateWorkInProgressHook` throws *"Rendered more hooks than during the previous render"*.[^uwih] With fewer, you get the `finishRenderingHooks` error from section 1. The official rule text is on react.dev.[^rulesdoc]
+当 `show` 由 `true` 变为 `false` 时，`useState(0)` 会错位配对到上一轮存放 `'a'` 的那个节点，因而荒谬地返回了状态值 `'a'`。而如果两次渲染的 Hook 类型发生了错位（例如本该是 State 的位置复用了 Effect 节点），React 发现该节点的 `queue` 为 `null`，就会立即抛出致命异常：*"Should have a queue. You are likely calling Hooks conditionally"*（当前 Hook 应包含更新队列，你可能在条件语句中调用了 Hook）。[^uri] 如果新一轮渲染调用的 Hook 数量**超过**了旧链表的总长度，`updateWorkInProgressHook` 会抛出 *"Rendered more hooks than during the previous render"*；相反，如果调用的 Hook 数量**少于**旧链表，则会在第 1 节提到的 `finishRenderingHooks` 中触发 *"Rendered fewer hooks than expected"* 报错。[^uwih][^finish] 官方规则文档参见 react.dev。[^rulesdoc]
 
-Why design it this way instead of keys? Positional identity keeps the API key-free (`useState(0)`, not `useState('count', 0)`), composes freely through custom hooks without namespacing, and lets lookup be a pointer bump instead of a map lookup. The cost is a rule a linter has to enforce. The React team considers that a good trade.
+为什么不采用 Key，而偏偏采用物理位置？基于物理位置标识（Positional Identity）的设计，使得整个 Hooks API 完全免除了显式 Key 的心智负担（你可以直接书写 `useState(0)`，而不是繁琐的 `useState('count', 0)`）；更重要的是，它让自定义 Hook 能够像搭积木一样自由组合而完全无需担心命名空间冲突，并在运行时将状态查找的开销从哈希表查询（Map Lookup）骤降为了极速的指针单步递增（Pointer Bump）。其唯一付出的代价，就是引入了一条需要通过 Linter 静态规则来约束的开发范式——而在 React 团队看来，这是一笔极其划算的架构权衡。
 
-## 8. StrictMode: the double invoke, precisely
+## 8. StrictMode 严格模式：精准拆解“双重调用”机制
 
-In DEV, if the fiber has `StrictLegacyMode` in its mode, `renderWithHooks` calls your component **twice**. The second call goes through `renderWithHooksAgain`.[^rwh][^rwha] Precisely:
+在开发模式（DEV）下，如果当前 Fiber 节点的模式包含 `StrictLegacyMode`，`renderWithHooks` 会将你的组件函数连续调用**两次**。第二次调用通过 `renderWithHooksAgain` 触发。[^rwh][^rwha] 详细执行细节如下：
 
-- The **first** call runs with the *mount* dispatcher and `shouldDoubleInvokeUserFnsInHooksDEV = true`. Inside it, `mountState`'s lazy initializer, `mountReducer`'s `init`, and `mountMemo`'s factory are each called twice, and the second result is thrown away.[^mountstateimpl][^mountreducer][^mountmemo]
-- The **second** call uses `HooksDispatcherOnRerender`. `renderWithHooksAgain` resets `currentHook`/`workInProgressHook` to `null` but keeps `workInProgress.memoizedState`. So `updateWorkInProgressHook` walks and *reuses* the hook list the first call built.[^rwha][^uwih] The ref object, the state, and the memoized value are identical between the two calls. Only the component body is re-executed.
-- Effects aren't run twice during render. StrictMode's "mount → unmount → mount" effect simulation happens at commit time (`doubleInvokeEffectsInDEVIfNecessary`, driven by `MountPassiveDevEffect`/`MountLayoutDevEffect`).[^dbleffects]
+- **首轮调用**：采用挂载分发器（`HooksDispatcherOnMount`）执行，并开启标志位 `shouldDoubleInvokeUserFnsInHooksDEV = true`。在此过程中，`mountState` 的惰性初始化函数、`mountReducer` 的 `init` 函数以及 `mountMemo` 的工厂函数都会被**主动调用两次**，随后默默丢弃第二次调用的执行结果。[^mountstateimpl][^mountreducer][^mountmemo]
+- **次轮调用**：切换至重渲染分发器 `HooksDispatcherOnRerender`。`renderWithHooksAgain` 会将游标指针 `currentHook` 和 `workInProgressHook` 重置为 `null`，但**完整保留**第一轮调用已经构建出来的 `workInProgress.memoizedState` 链表。因此，第二轮执行时 `updateWorkInProgressHook` 只是沿着既有链表前行，并**直接复用**第一轮创建好的 Hook 节点。[^rwha][^uwih] Ref 对象、状态存储和缓存计算值在两次调用之间完全保持同一引用，只有组件函数本身的代码体被重复执行了一遍。
+- **Effect 副作用在渲染阶段绝不执行两次**：开发者常常误以为 StrictMode 的“挂载 → 卸载 → 再次挂载”是发生在渲染阶段，但实际上它完全发生在 Commit 提交阶段（由 `MountPassiveDevEffect` / `MountLayoutDevEffect` 标志位驱动，在 `doubleInvokeEffectsInDEVIfNecessary` 中模拟调度）。[^dbleffects]
 
-> [!warning] Misconception: "StrictMode renders my component twice so state initialises twice"
-> The initializer *function* runs twice, but there's only one hook node and the first result is kept. If your initializer has side effects (it subscribes to something, increments a global counter), you'll see them twice. If it's pure, you'll never notice.
+> [!warning] 常见误区：“严格模式渲染了两次，所以 State 初始化了两次”
+> 事实真相是：初始化的计算**函数**确实被调用了两次，但内存中自始至终只创建了**一个** Hook 节点，并且 React 最终保留的是第一次的计算结果。如果你的初始化函数暗含副作用（例如在函数体内发起了事件订阅、或者递增了全局计数器），你才会观察到两次执行带来的偏差；而只要你的初始化逻辑保持纯粹，这两次调用在外部表现上完全毫无痕迹。
 
-## With the React Compiler
+## 联动 React 编译器：`useMemoCache` 底层机制
 
-The compiler rewrites your component so it starts with `const $ = _c(N)`, where `_c` is imported from `react/compiler-runtime`. On React 19, `_c` *is* `useMemoCache`: `ReactCompilerRuntime.js` re-exports `useMemoCache as c`, and the runtime package uses `React.__COMPILER_RUNTIME.c` when present. It only falls back to a `useMemo`-based polyfill for React < 19.[^ccompilerrt][^cruntime] `useMemoCache` dispatches through `ReactSharedInternals.H` like any other hook.[^reacthooksmc] The full transform is in [[14 React Compiler - How It Works|React Compiler]].
+编译器会改写你的组件代码，使其在开头声明 `const $ = _c(N)`，其中 `_c` 从 `react/compiler-runtime` 中导入。在 React 19 中，`_c` **本质上就是 `useMemoCache`**：`ReactCompilerRuntime.js` 直接通过 `export { useMemoCache as c }` 导出，且运行时包在检测到 `React.__COMPILER_RUNTIME.c` 存在时会优先直接使用它。只有在 React 19 之前的版本中，它才会降级为基于 `useMemo` 的 Polyfill 实现。[^ccompilerrt][^cruntime] `useMemoCache` 与其他 Hook 一样，都是通过全局分发器 `ReactSharedInternals.H` 完成路由调度的。[^reacthooksmc] 完整的编译转换细节详见 [[14 React Compiler - How It Works|14 · 编译器工作原理]]。
 
-There is no `mountMemoCache`. A single `useMemoCache` function sits in all three dispatchers, and it **doesn't touch the hook linked list at all**.[^umc][^dmount] Simplified:
+源码中**根本不存在 `mountMemoCache`**。所有的分发器（挂载、更新、重渲染）共用同一个 `useMemoCache` 函数实现，而且它**完全不触碰 Hook 单向链表**。[^umc][^dmount] 简化后的实现如下：
 
 ```js
 function useMemoCache(size) {
@@ -244,7 +251,7 @@ function useMemoCache(size) {
     const current = currentlyRenderingFiber.alternate;
     const currentMemoCache = current?.updateQueue?.memoCache;
     if (currentMemoCache != null) {
-      memoCache = {                                   // update: copy-on-write clone
+      memoCache = {                                   // 更新阶段：写时复制（Copy-on-write）克隆
         data: enableNoCloningMemoCache
           ? currentMemoCache.data
           : currentMemoCache.data.map(array => array.slice()),
@@ -252,7 +259,7 @@ function useMemoCache(size) {
       };
     }
   }
-  if (memoCache == null) memoCache = { data: [], index: 0 };   // mount: brand-new
+  if (memoCache == null) memoCache = { data: [], index: 0 };   // 挂载阶段：全新创建
   if (updateQueue === null) {
     updateQueue = createFunctionComponentUpdateQueue();
     currentlyRenderingFiber.updateQueue = updateQueue;
@@ -262,84 +269,84 @@ function useMemoCache(size) {
   let data = memoCache.data[memoCache.index];
   if (data === undefined) {
     data = memoCache.data[memoCache.index] = new Array(size);
-    for (let i = 0; i < size; i++) data[i] = REACT_MEMO_CACHE_SENTINEL; // "never computed"
+    for (let i = 0; i < size; i++) data[i] = REACT_MEMO_CACHE_SENTINEL; // 填充“从未计算过”哨兵值
   }
   memoCache.index++;
   return data;
 }
 ```
 
-Where it lives: **`fiber.updateQueue.memoCache`**, which is `{data: Array<Array<mixed>>, index}`. `data` is an array of cache arrays, one per `useMemoCache` call in the component. Compiled components normally call it once. `index` is a cursor that works like the hook-list cursor.[^fcuq][^umc]
+存储物理位置：**`fiber.updateQueue.memoCache`**，其数据结构为 `{data: Array<Array<mixed>>, index}`。其中 `data` 是一个由若干缓存数组组成的二维数组，组件中每次调用 `useMemoCache` 会分配其中一项（经过编译后的组件通常只在顶部调用一次）。`index` 则是一个与 Hook 链表游标工作原理高度相似的索引指针。[^fcuq][^umc]
 
-On mount, the cache array is allocated with `size` slots, each filled with `REACT_MEMO_CACHE_SENTINEL`, which is `Symbol.for('react.memo_cache_sentinel')`.[^umc][^sentinel] Compiled code checks `if ($[0] === Symbol.for("react.memo_cache_sentinel"))` for "computed once" values, and `if ($[0] !== props.x)` for dependency checks. On the first render, every check fails and every block computes. The compiler is "free" on mount only in the sense that it adds one array allocation and some comparisons.
+在挂载阶段，分配出的缓存数组包含 `size` 个插槽，全部用哨兵值 `REACT_MEMO_CACHE_SENTINEL`（其值为全局 Symbol `Symbol.for('react.memo_cache_sentinel')`）填满。[^umc][^sentinel] 编译产物在运行时对于“仅需计算一次”的值会比对 `if ($[0] === Symbol.for("react.memo_cache_sentinel"))`；而对于带依赖项的块，则比对 `if ($[0] !== props.x)`。在首次渲染时，由于缓存中全为哨兵值，所有的比对条件均必然判定为失效，所有代码块都会如实计算。因此，在挂载阶段，编译器所谓的“零成本”仅仅是指它只增加了一次数组内存分配和若干次基础条件比对而已。
 
-Gotchas worth knowing:
+架构层面的关键细节：
 
-- Because it uses `updateQueue` rather than a hook slot, `useMemoCache` doesn't shift the positions of your other hooks. The compiler still always emits it unconditionally as the first statement.
-- `renderWithHooks` sets `workInProgress.updateQueue = null` at the start of every render.[^rwh] That's why the update path has to pull the cache from `alternate`. See [[11 Hooks on Update|Hooks on Update]] for the copy-on-write and bailout behaviour.
-- On a render-phase re-render (and the StrictMode second pass), `resetFunctionComponentUpdateQueue` only resets `memoCache.index = 0` and keeps the arrays.[^resetfcuq] The second pass sees a warm cache.
-- In DEV, if `ignorePreviousDependencies` is set (Fast Refresh swapped the component type), the cache array is reallocated. A different `size` on the same call logs an error.[^umc]
+- **不影响 Hook 链表排位**：由于 `useMemoCache` 直接寄生在 `updateQueue` 上而不是插入 Hook 链表，它绝不会打乱任何业务 Hook 的相对位置偏移。尽管如此，编译器仍然总会无条件地将其作为组件函数的第一行语句输出。
+- **跨渲染的缓存继承**：`renderWithHooks` 在每一次渲染开始时，都会主动将 `workInProgress.updateQueue` 置为 `null`。[^rwh] 这正是为什么在更新分支中，它必须从 `alternate` 镜像节点中拉取已有的缓存。关于写时复制（COW）与 Bailout 跳过机制，详见 [[11 Hooks on Update|11 · Hooks 更新阶段]]。
+- **双重调用下的缓存预热**：在渲染阶段发生重渲染（以及 StrictMode 的第二轮执行）时，`resetFunctionComponentUpdateQueue` 只会将 `memoCache.index` 重置为 `0`，而**完整保留**已经计算填充分配好的数组。[^resetfcuq] 这意味着第二轮渲染直接享受到了一个“已预热（Warm）”的高速缓存。
+- **开发环境 Fast Refresh 热重载**：在 DEV 下，如果标记了 `ignorePreviousDependencies`（例如热重载替换了组件实现），缓存数组会被强制重新分配；若同一调用处的 `size` 发生了变更，React 则会在控制台抛出明确错误。[^umc]
 
-Comparison with [[15 Rendering With vs Without the Compiler|manual memoization]]: a hand-written `useMemo` costs one Hook node plus a `[value, deps]` tuple per call. The compiler's cache costs one flat array per component, however many values it memoizes.
+与 [[15 Rendering With vs Without the Compiler|15 · 启用与未启用编译器的对比]] 相比：手写的 `useMemo` 每调用一次，都需要在内存中分配一个完整的 `Hook` 链表节点以及一个 `[value, deps]` 依赖元组；而 React 编译器的缓存机制在整个组件生命周期中，无论需要记忆化多少个内部变量，都仅仅只需要一个扁平的一维/二维数组即可完成全部托管。
 
-## Summary
+## 全文总结
 
-A function component's first render runs inside `renderWithHooks`, which installs the mount dispatcher on `ReactSharedInternals.H`, calls your function, and then swaps in a dispatcher that throws. Each hook call appends one `Hook` node to a linked list on `fiber.memoizedState`, and effects also go on a circular ring in `fiber.updateQueue`. Nothing is named or keyed: a hook's identity is its position in that list, and the rules of hooks follow directly from it. The compiler's `useMemoCache` sidesteps the list entirely and keeps its cache on `fiber.updateQueue.memoCache`. [[11 Hooks on Update|Hooks on Update]] shows how the next render walks this list in step.
+函数组件的首次渲染完全封装在 `renderWithHooks` 中运行：它将挂载阶段分发器安装到全局 `ReactSharedInternals.H` 上，执行你的组件函数，并在退出时迅速替换为一个处处抛错的分发器。组件内部每一次 Hook 调用，都会向挂载在 `fiber.memoizedState` 上的单向链表追加一个 `Hook` 节点；与此同时，副作用还会被额外编入 `fiber.updateQueue` 的环形链表中。在整个底层数据流中没有任何变量名或 Key：Hook 的唯一身份标识就是它在链表中的物理序列位置，Hooks 的使用规则正是这一底层拓扑结构的必然推论。而 React 编译器的 `useMemoCache` 则完全绕开了 Hook 链表，将独立缓存寄托在 `fiber.updateQueue.memoCache` 上。在下一篇 [[11 Hooks on Update|11 · Hooks 更新阶段]] 中，我们将看到更新阶段是如何步步对齐并遍历这条链表的。
 
-### Key takeaways
+### 核心知识点清单
 
-- **`renderWithHooks`**: picks `HooksDispatcherOnMount` when `current === null || current.memoizedState === null`, then installs `ContextOnlyDispatcher`, so hooks outside render throw.
-- **`mountWorkInProgressHook`**: appends a node using a module-level cursor; there is no index variable.
-- **`mountState`**: `useState` is `useReducer` with `basicStateReducer`, and its setter is `dispatchSetState` bound to the fiber and queue, created once and stable.
-- **`mountEffectImpl`**: sets a fiber flag (`PassiveEffect`) that bubbles to `subtreeFlags`, plus hook tags (`HookHasEffect | HookPassive`) that the commit phase filters on.
-- **`useRef`**: a hook slot holding a mutable object; writing `ref.current` schedules nothing.
-- **`useContext` and `use`**: neither takes a hook slot; `readContext` writes to `fiber.dependencies` and `use` has its own thenable counter (the rules of hooks still apply to `useContext`).
-- **Rules of hooks**: on update the *n*-th call is paired with the *n*-th node from the last render, so conditional calls read the wrong state or throw.
-- **StrictMode**: the second call reuses the hook list from the first, so only the body and initializer functions run twice.
-- **`useMemoCache`**: one flat array per component, filled with `REACT_MEMO_CACHE_SENTINEL` on mount.
+- **`renderWithHooks`**：当满足 `current === null || current.memoizedState === null` 时装配 `HooksDispatcherOnMount`；组件函数返回后立即切换为 `ContextOnlyDispatcher`，从而确保在渲染阶段之外调用 Hook 必定抛出异常。
+- **`mountWorkInProgressHook`**：借助模块级全局游标指针向链表尾部追加节点，底层压根不存在任何数组索引变量。
+- **`mountState`**：`useState` 底层就是搭载了 `basicStateReducer` 的 `useReducer`；其状态变更器 `dispatchSetState` 在挂载时一次性绑定到对应的 Fiber 节点与更新队列上，具有天然且绝对的引用稳定性。
+- **`mountEffectImpl`**：在 Fiber 节点上打上能够向上冒泡至 `subtreeFlags` 的标志位（`PassiveEffect`），并在 Hook 自身打上副作用标签（`HookHasEffect | HookPassive`），供 Commit 阶段作为执行掩码进行精确过滤。
+- **`useRef`**：仅是一个持有普通可变对象的 Hook 槽位；对 `ref.current` 的读写赋值不会触发任何更新调度，不涉及优先级赛道（Lanes）和 Fiber 机制。
+- **`useContext` 与 `use`**：两者均不占用 Hook 链表槽位；`readContext` 将依赖关系记录在 `fiber.dependencies` 中，而 `use` 则拥有自己独立的 Thenable 计数器（将 Hooks 规则套用在 `useContext` 上主要是为了保持 API 心智一致性）。
+- **Hooks 使用规则的本质**：在更新阶段，当前的第 $n$ 次 Hook 调用会无条件与上一轮的第 $n$ 个链表节点配对，因此在条件语句中调用 Hook 必然会导致状态错位或运行时崩溃。
+- **StrictMode 严格模式**：第二轮调用完整复用第一轮构建的 Hook 链表，因此只有组件函数体以及惰性初始化函数会真正被执行两次。
+- **`useMemoCache`**：每个组件独享一个扁平数组，首次挂载时所有槽位均预填为哨兵值 `REACT_MEMO_CACHE_SENTINEL`。
 
 ---
-← [[09 Commit Phase - Mutation, Layout, Passive Effects|Prev]] · [[00 React Internals Index|Index]] · [[11 Hooks on Update|Next]] →
+← [[09 Commit Phase - Mutation, Layout, Passive Effects|上一篇：Commit 阶段]] · [[00 React Internals Index|专栏目录索引]] · [[11 Hooks on Update|下一篇：Hooks 更新阶段]] →
 
-[^ufc]: `updateFunctionComponent` calls `renderWithHooks` — [packages/react-reconciler/src/ReactFiberBeginWork.js#L1453-L1562](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberBeginWork.js#L1453-L1562)
-[^resolve]: `resolveDispatcher` reads `ReactSharedInternals.H` — [packages/react/src/ReactHooks.js#L24-L42](https://github.com/facebook/react/blob/v19.3.1/packages/react/src/ReactHooks.js#L24-L42)
-[^usestate]: public `useState` — [packages/react/src/ReactHooks.js#L66-L71](https://github.com/facebook/react/blob/v19.3.1/packages/react/src/ReactHooks.js#L66-L71)
-[^rwh]: `renderWithHooks` — [packages/react-reconciler/src/ReactFiberHooks.js#L505-L634](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L505-L634)
-[^dmount]: `HooksDispatcherOnMount` — [packages/react-reconciler/src/ReactFiberHooks.js#L3926-L3952](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L3926-L3952)
-[^dupdate]: `HooksDispatcherOnUpdate` — [packages/react-reconciler/src/ReactFiberHooks.js#L3954-L3980](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L3954-L3980)
-[^finish]: `finishRenderingHooks` (resets dispatcher, "Rendered fewer hooks" check) — [packages/react-reconciler/src/ReactFiberHooks.js#L636-L753](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L636-L753)
-[^ctxonly]: `ContextOnlyDispatcher` (every hook = `throwInvalidHookError`) — [packages/react-reconciler/src/ReactFiberHooks.js#L3898-L3924](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L3898-L3924)
-[^hooktype]: `Hook` type — [packages/react-reconciler/src/ReactFiberHooks.js#L197-L203](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L197-L203)
-[^mwih]: `mountWorkInProgressHook` — [packages/react-reconciler/src/ReactFiberHooks.js#L983-L1002](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L983-L1002)
-[^mountstateimpl]: `mountStateImpl` — [packages/react-reconciler/src/ReactFiberHooks.js#L1920-L1946](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1920-L1946)
-[^mountstate]: `mountState` (binds `dispatchSetState`) — [packages/react-reconciler/src/ReactFiberHooks.js#L1948-L1960](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1948-L1960)
-[^uri]: `updateReducerImpl` ("Should have a queue" error; returns `queue.dispatch`) — [packages/react-reconciler/src/ReactFiberHooks.js#L1316-L1589](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1316-L1589)
-[^bsr]: `basicStateReducer` — [packages/react-reconciler/src/ReactFiberHooks.js#L1265-L1268](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1265-L1268)
-[^mountreducer]: `mountReducer` — [packages/react-reconciler/src/ReactFiberHooks.js#L1270-L1305](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1270-L1305)
-[^dra]: `dispatchReducerAction` (no eager-state path) — [packages/react-reconciler/src/ReactFiberHooks.js#L3583-L3624](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L3583-L3624)
+[^ufc]: `updateFunctionComponent` 调用 `renderWithHooks` — [packages/react-reconciler/src/ReactFiberBeginWork.js#L1453-L1562](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberBeginWork.js#L1453-L1562)
+[^resolve]: `resolveDispatcher` 读取 `ReactSharedInternals.H` — [packages/react/src/ReactHooks.js#L24-L42](https://github.com/facebook/react/blob/v19.3.1/packages/react/src/ReactHooks.js#L24-L42)
+[^usestate]: 公共 `useState` API — [packages/react/src/ReactHooks.js#L66-L71](https://github.com/facebook/react/blob/v19.3.1/packages/react/src/ReactHooks.js#L66-L71)
+[^rwh]: `renderWithHooks` 核心调度与分发器装配 — [packages/react-reconciler/src/ReactFiberHooks.js#L505-L634](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L505-L634)
+[^dmount]: `HooksDispatcherOnMount` 挂载分发器实现 — [packages/react-reconciler/src/ReactFiberHooks.js#L3926-L3952](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L3926-L3952)
+[^dupdate]: `HooksDispatcherOnUpdate` 更新分发器实现 — [packages/react-reconciler/src/ReactFiberHooks.js#L3954-L3980](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L3954-L3980)
+[^finish]: `finishRenderingHooks`（重置分发器并执行“Hook 数量少于预期”校验）— [packages/react-reconciler/src/ReactFiberHooks.js#L636-L753](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L636-L753)
+[^ctxonly]: `ContextOnlyDispatcher`（所有 Hook 调用均指向 `throwInvalidHookError`）— [packages/react-reconciler/src/ReactFiberHooks.js#L3898-L3924](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L3898-L3924)
+[^hooktype]: `Hook` 数据类型定义 — [packages/react-reconciler/src/ReactFiberHooks.js#L197-L203](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L197-L203)
+[^mwih]: `mountWorkInProgressHook` 分配并追加 Hook 节点 — [packages/react-reconciler/src/ReactFiberHooks.js#L983-L1002](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L983-L1002)
+[^mountstateimpl]: `mountStateImpl` 状态挂载底层实现 — [packages/react-reconciler/src/ReactFiberHooks.js#L1920-L1946](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1920-L1946)
+[^mountstate]: `mountState`（固化绑定 `dispatchSetState`）— [packages/react-reconciler/src/ReactFiberHooks.js#L1948-L1960](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1948-L1960)
+[^uri]: `updateReducerImpl`（“Should have a queue”校验并返回 `queue.dispatch`）— [packages/react-reconciler/src/ReactFiberHooks.js#L1316-L1589](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1316-L1589)
+[^bsr]: `basicStateReducer` 默认状态规约函数 — [packages/react-reconciler/src/ReactFiberHooks.js#L1265-L1268](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1265-L1268)
+[^mountreducer]: `mountReducer` 实现 — [packages/react-reconciler/src/ReactFiberHooks.js#L1270-L1305](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1270-L1305)
+[^dra]: `dispatchReducerAction`（不包含急切状态计算跳过逻辑）— [packages/react-reconciler/src/ReactFiberHooks.js#L3583-L3624](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L3583-L3624)
 [^mounteffect]: `mountEffect` — [packages/react-reconciler/src/ReactFiberHooks.js#L2697-L2719](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L2697-L2719)
 [^mounteffectimpl]: `mountEffectImpl` — [packages/react-reconciler/src/ReactFiberHooks.js#L2640-L2655](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L2640-L2655)
-[^hooktags]: Hook effect tags — [packages/react-reconciler/src/ReactHookEffectTags.js#L12-L20](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactHookEffectTags.js#L12-L20)
-[^chelm]: `commitHookEffectListMount` (`(effect.tag & flags) === flags`) — [packages/react-reconciler/src/ReactFiberCommitEffects.js#L141-L247](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberCommitEffects.js#L141-L247)
+[^hooktags]: Hook 副作用标签定义 — [packages/react-reconciler/src/ReactHookEffectTags.js#L12-L20](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactHookEffectTags.js#L12-L20)
+[^chelm]: `commitHookEffectListMount`（`(effect.tag & flags) === flags` 掩码匹配）— [packages/react-reconciler/src/ReactFiberCommitEffects.js#L141-L247](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberCommitEffects.js#L141-L247)
 [^pushsimple]: `pushSimpleEffect` — [packages/react-reconciler/src/ReactFiberHooks.js#L2588-L2603](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L2588-L2603)
-[^pusheffectimpl]: `pushEffectImpl` (circular list on `updateQueue.lastEffect`) — [packages/react-reconciler/src/ReactFiberHooks.js#L2605-L2622](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L2605-L2622)
-[^fcuq]: `FunctionComponentUpdateQueue` type and `createFunctionComponentUpdateQueue` — [packages/react-reconciler/src/ReactFiberHooks.js#L249-L254](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L249-L254), [#L1075-L1082](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1075-L1082)
-[^effecttype]: `EffectInstance` / `Effect` types — [packages/react-reconciler/src/ReactFiberHooks.js#L219-L229](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L219-L229)
+[^pusheffectimpl]: `pushEffectImpl`（在 `updateQueue.lastEffect` 上构建环形链表）— [packages/react-reconciler/src/ReactFiberHooks.js#L2605-L2622](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L2605-L2622)
+[^fcuq]: `FunctionComponentUpdateQueue` 类型定义与工厂函数 — [packages/react-reconciler/src/ReactFiberHooks.js#L249-L254](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L249-L254), [#L1075-L1082](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1075-L1082)
+[^effecttype]: `EffectInstance` 与 `Effect` 类型定义 — [packages/react-reconciler/src/ReactFiberHooks.js#L219-L229](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L219-L229)
 [^mountref]: `mountRef` — [packages/react-reconciler/src/ReactFiberHooks.js#L2628-L2633](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L2628-L2633)
 [^updateref]: `updateRef` — [packages/react-reconciler/src/ReactFiberHooks.js#L2635-L2638](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L2635-L2638)
 [^mountmemo]: `mountMemo` — [packages/react-reconciler/src/ReactFiberHooks.js#L2944-L2961](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L2944-L2961)
 [^mountcb]: `mountCallback` — [packages/react-reconciler/src/ReactFiberHooks.js#L2923-L2928](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L2923-L2928)
 [^readctx]: `readContext` — [packages/react-reconciler/src/ReactFiberNewContext.js#L553-L567](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberNewContext.js#L553-L567)
-[^readctxconsumer]: `readContextForConsumer` (appends to `fiber.dependencies`) — [packages/react-reconciler/src/ReactFiberNewContext.js#L580-L627](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberNewContext.js#L580-L627)
+[^readctxconsumer]: `readContextForConsumer`（追加依赖到 `fiber.dependencies`）— [packages/react-reconciler/src/ReactFiberNewContext.js#L580-L627](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberNewContext.js#L580-L627)
 [^use]: `use` — [packages/react-reconciler/src/ReactFiberHooks.js#L1159-L1179](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1159-L1179)
 [^usethenable]: `useThenable` — [packages/react-reconciler/src/ReactFiberHooks.js#L1098-L1157](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1098-L1157)
 [^uwih]: `updateWorkInProgressHook` — [packages/react-reconciler/src/ReactFiberHooks.js#L1004-L1073](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1004-L1073)
-[^rulesdoc]: Rules of Hooks — react.dev, https://react.dev/reference/rules/rules-of-hooks
+[^rulesdoc]: React 官方 Hooks 规则文档 — react.dev, https://react.dev/reference/rules/rules-of-hooks
 [^rwha]: `renderWithHooksAgain` — [packages/react-reconciler/src/ReactFiberHooks.js#L791-L857](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L791-L857)
 [^dbleffects]: `doubleInvokeEffectsOnFiber` / `doubleInvokeEffectsInDEVIfNecessary` — [packages/react-reconciler/src/ReactFiberWorkLoop.js#L5328-L5388](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberWorkLoop.js#L5328-L5388)
-[^ccompilerrt]: `react/compiler-runtime` re-exports `useMemoCache as c` — [packages/react/src/ReactCompilerRuntime.js#L10](https://github.com/facebook/react/blob/v19.3.1/packages/react/src/ReactCompilerRuntime.js#L10)
-[^cruntime]: `react-compiler-runtime` `c` (uses `React.__COMPILER_RUNTIME.c`, else `useMemo` polyfill) — [compiler/packages/react-compiler-runtime/src/index.ts#L19-L39](https://github.com/facebook/react/blob/v19.3.1/compiler/packages/react-compiler-runtime/src/index.ts#L19-L39)
-[^reacthooksmc]: public `useMemoCache` — [packages/react/src/ReactHooks.js#L212-L216](https://github.com/facebook/react/blob/v19.3.1/packages/react/src/ReactHooks.js#L212-L216)
-[^umc]: `useMemoCache` (reconciler) — [packages/react-reconciler/src/ReactFiberHooks.js#L1181-L1263](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1181-L1263)
-[^sentinel]: `REACT_MEMO_CACHE_SENTINEL` — [packages/shared/ReactSymbols.js#L41-L43](https://github.com/facebook/react/blob/v19.3.1/packages/shared/ReactSymbols.js#L41-L43)
+[^ccompilerrt]: `react/compiler-runtime` 重新导出 `useMemoCache as c` — [packages/react/src/ReactCompilerRuntime.js#L10](https://github.com/facebook/react/blob/v19.3.1/packages/react/src/ReactCompilerRuntime.js#L10)
+[^cruntime]: `react-compiler-runtime` 中的 `c`（优先使用 `React.__COMPILER_RUNTIME.c`，否则降级为 `useMemo` polyfill）— [compiler/packages/react-compiler-runtime/src/index.ts#L19-L39](https://github.com/facebook/react/blob/v19.3.1/compiler/packages/react-compiler-runtime/src/index.ts#L19-L39)
+[^reacthooksmc]: 公共 `useMemoCache` API — [packages/react/src/ReactHooks.js#L212-L216](https://github.com/facebook/react/blob/v19.3.1/packages/react/src/ReactHooks.js#L212-L216)
+[^umc]: Reconciler 中的 `useMemoCache` 实现 — [packages/react-reconciler/src/ReactFiberHooks.js#L1181-L1263](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1181-L1263)
+[^sentinel]: `REACT_MEMO_CACHE_SENTINEL` 缓存未命中哨兵值 — [packages/shared/ReactSymbols.js#L41-L43](https://github.com/facebook/react/blob/v19.3.1/packages/shared/ReactSymbols.js#L41-L43)
 [^resetfcuq]: `resetFunctionComponentUpdateQueue` — [packages/react-reconciler/src/ReactFiberHooks.js#L1084-L1096](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberHooks.js#L1084-L1096)

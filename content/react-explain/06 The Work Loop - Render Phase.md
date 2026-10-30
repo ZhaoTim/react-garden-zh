@@ -1,25 +1,25 @@
 ---
 tags: [react, react-internals, work-loop, render-phase]
-aliases: [Work Loop]
+aliases: [工作循环, Work Loop]
 react-version: 19.3.1
 created: 2026-10-25T11:54:02.260Z
 ---
 
-# The Work Loop - Render Phase
+# 工作循环：Render 阶段 (The Work Loop - Render Phase)
 
-> [!summary] TL;DR
-> `performWorkOnRoot` decides whether this render may be time-sliced, then calls `renderRootSync` or `renderRootConcurrent`. Both clone the HostRoot into a work-in-progress fiber (`prepareFreshStack` → `createWorkInProgress`) and then spin a `while` loop over a single global pointer, `workInProgress`, calling `performUnitOfWork` (→ `beginWork` going down, `completeUnitOfWork` → `completeWork` coming back up). Nothing in this phase touches the screen, so React can pause it, throw it away, or restart it. When the loop finishes, the finished tree goes to `commitRoot` ([[09 Commit Phase - Mutation, Layout, Passive Effects|Commit Phase]]).
+> [!summary] 核心速览（TL;DR）
+> `performWorkOnRoot` 首先判定本次渲染是否可以开启时间切片（Time Slicing），接着调用 `renderRootSync` 或 `renderRootConcurrent`。两者都会将宿主根节点 `HostRoot` 克隆为一个代表“正在进行中的工作”的 Fiber 节点（WIP Fiber，链路为 `prepareFreshStack` → `createWorkInProgress`），随后围绕全局唯一的单例指针 `workInProgress` 运转 `while` 循环，不断调用 `performUnitOfWork`（自顶向下下潜时执行 `beginWork`，自底向上回溯时执行 `completeUnitOfWork` → `completeWork`）。在此阶段中，没有任何操作会触碰真实屏幕像素，因此 React 可以随心所欲地暂停它、直接丢弃它或从头重新启动它。当整个工作循环彻底执行完毕后，构建完成的 Fiber 树会被交由 `commitRoot` 处理（参见 [[09 Commit Phase - Mutation, Layout, Passive Effects|09 · Commit 阶段：Mutation、Layout 与被动副作用]]）。
 
-## Where we enter
+## 渲染流程的入口
 
-By the time you get here, an update has already been queued on a fiber and a lane assigned ([[03 root.render - Scheduling the First Update|root.render]], [[12 setState - dispatchSetState and Batching|setState]]). The root scheduler then calls into the work loop in one of two ways ([[04 Lanes and the Scheduler|Lanes & Scheduler]]):
+当执行流到达这里时，更新已经被推入了某个 Fiber 的更新队列中，并分配了相应的优先级车道（参见 [[03 root.render - Scheduling the First Update|03 · root.render：调度首个更新]] 与 [[12 setState - dispatchSetState and Batching|12 · setState：dispatchSetState 与批处理机制]]）。随后，根调度器（Root Scheduler）会通过以下两条截然不同的路径之一调用进入工作循环（参见 [[04 Lanes and the Scheduler|04 · Lanes 赛道模型与 Scheduler]]）：
 
-- **Sync lanes** (e.g. a click → `SyncLane`): `scheduleTaskForRootDuringMicrotask` does *not* create a Scheduler task. It sets `root.callbackPriority = SyncLane`, and the microtask flush calls `performSyncWorkOnRoot`, which calls `performWorkOnRoot(root, lanes, forceSync = true)`.[^sched-sync][^perf-sync]
-- **Everything else**: a Scheduler task is posted with `performWorkOnRootViaSchedulerTask.bind(null, root)`. That task first flushes any pending passive effects, recomputes `getNextLanes`, calls `performWorkOnRoot`, and returns *itself* as a continuation if the root still has work at that priority.[^sched-task]
+- **同步车道（Sync lanes）**（例如用户点击产生的 `SyncLane`）：`scheduleTaskForRootDuringMicrotask` **不会**创建任何 Scheduler 任务。它直接设置 `root.callbackPriority = SyncLane`，随后在清空微任务队列（Microtask Flush）时调用 `performSyncWorkOnRoot`，紧接着调用 `performWorkOnRoot(root, lanes, forceSync = true)`。[^sched-sync][^perf-sync]
+- **除此以外的所有情况**：向 Scheduler 派发一个调度任务，执行回调绑定为 `performWorkOnRootViaSchedulerTask.bind(null, root)`。该任务首先会清空任何待处理的被动副作用（Passive Effects，即 `useEffect`），重新通过 `getNextLanes` 计算本次要处理的车道集合，调用 `performWorkOnRoot`；如果当前 Root 在该优先级下仍有未完成的剩余工作，它会返回**自身函数**作为延续函数（Continuation）。[^sched-task]
 
-That continuation return is how a time-sliced render picks up where it left off on the next macrotask. It is not a recursive call. Scheduler sees a function come back and keeps it as the same task.
+返回延续函数（Continuation return），正是时间切片渲染能够在下一个宏任务中“原地复工、继续推进”的核心机制。这绝不是递归调用，Scheduler 只要看到任务函数返回了一个新的函数引用，就会在调度循环中将它作为同一任务继续保留并排队等待下一帧执行。
 
-## performWorkOnRoot: the shouldTimeSlice decision
+## performWorkOnRoot：shouldTimeSlice 判定逻辑
 
 ```js
 // ReactFiberWorkLoop.js (simplified)
@@ -44,37 +44,37 @@ export function performWorkOnRoot(root, lanes, forceSync) {
 ```
 [^pwor]
 
-The decision that matters is `includesBlockingLane`. Its "blocking" set is `SyncLane`, `InputContinuousLane`, **`DefaultLane`**, the hydration variants of those, and `GestureLane`.[^blocking] That has a consequence people often miss:
+真正起决定性作用的是 `includesBlockingLane` 判定。“阻塞性（Blocking）”车道集合包括 `SyncLane`、`InputContinuousLane`、**`DefaultLane`**、它们对应的注水（Hydration）变体，以及 `GestureLane`。[^blocking] 这带来了一个很多人常常忽视的关键事实：
 
-> [!warning] Misconception: "createRoot makes everything concurrent/time-sliced"
-> The first `root.render(<App/>)` outside an event gets `DefaultLane`, and `DefaultLane` counts as blocking. So the initial mount runs through **`renderRootSync`** in one uninterrupted go, even under `createRoot`. Only Transition, Retry, Idle and Offscreen lanes actually yield to the browser mid-render. Concurrent rendering is something you opt into with `startTransition` / `useDeferredValue`. `createRoot` alone does not give it to you.
+> [!warning] 常见认知误区：“只要用了 createRoot，所有的渲染就都是并发/时间切片的”
+> 在任何事件之外直接调用的首次 `root.render(<App/>)`，分配到的都是 `DefaultLane`，而 `DefaultLane` 恰恰属于阻塞性车道！因此，即便在 `createRoot` 下，应用的初次挂载（Initial Mount）也是通过 **`renderRootSync`** 一气呵成、不间断地同步执行完成的。在实际运行时中，只有 Transition（过渡）、Retry（重试）、Idle（空闲）和 Offscreen 车道才会在渲染途中真正向浏览器让出主线程控制权。并发渲染并非默认开启，而是必须通过 `startTransition` / `useDeferredValue` 主动声明式启用的能力。光靠 `createRoot` 本身，根本不会让常规更新变成时间切片。
 
-The other two inputs:
-- `includesExpiredLane`: a lane that has waited too long gets marked expired, and from then on it renders synchronously so it cannot be starved.
-- `checkIfRootIsPrerendering`: if the root is only *prerendering* (warming up siblings of a suspended tree that can't commit yet), React always uses the concurrent loop, even for sync lanes, so that this speculative work never blocks the main thread.[^pwor]
+其余两个输入条件：
+- `includesExpiredLane`：如果某个车道在等待队列中滞留太久导致过期，就会被标记为已过期（Expired）。从这一刻起，它将被强制转为同步渲染，以防止更新被无限期饿死（Starvation）。
+- `checkIfRootIsPrerendering`：如果当前 Root 仅仅是在进行**预渲染（Prerendering）**（即挂起的子树尚无法提交，React 预先热身计算其兄弟节点），那么 React 即使面对同步车道也会始终采用并发循环，以确保这种推测性质的工作绝对不会阻塞主线程。[^pwor]
 
-After the render returns, `performWorkOnRoot` handles a few exit cases:
-- **`RootInProgress`**: the concurrent loop yielded. Break out. The scheduler task will return a continuation.
-- **Store tearing check**: if the render was concurrent, `isRenderConsistentWithExternalStores(finishedWork)` walks the tree to check that every `useSyncExternalStore` snapshot is still current. If one changed while React was yielded, it re-renders **synchronously** with `renderRootSync(root, lanes, false)` so nothing can interleave this time.[^tearing]
-- **Errors**: `RootErrored` gets one synchronous retry via `recoverFromConcurrentError`. `RootFatalErrored` resets the stack.[^pwor]
-- Otherwise it calls `finishConcurrentRender`, which either commits right away or, for suspended transitions and retries, marks the root suspended and may schedule a throttled `completeRootWhenReady` via `scheduleTimeout`.[^finish] `completeRootWhenReady` can also *suspend the commit* (waiting on stylesheets/images or an active View Transition) before calling `completeRoot` → `commitRoot`.[^ready]
+当渲染函数返回后，`performWorkOnRoot` 会统一处理以下几种退出分支（Exit Cases）：
+- **`RootInProgress`**：并发循环主动让出了主线程。直接跳出循环，Scheduler 任务将返回一个延续函数。
+- **外部 Store 数据撕裂检查（Store tearing check）**：如果刚才进行的是并发渲染，`isRenderConsistentWithExternalStores(finishedWork)` 会遍历整棵树，逐一核验每个 `useSyncExternalStore` 的快照（Snapshot）是否依然最新。如果某个快照在 React 让出控制权期间被外部静默篡改了，React 会立刻退回到**同步模式**，调用 `renderRootSync(root, lanes, false)` 重新渲染整棵树，确保这次没有任何其它代码能够穿插执行。[^tearing]
+- **错误处理（Errors）**：`RootErrored` 会通过 `recoverFromConcurrentError` 获得一次同步重试的机会；而严重的 `RootFatalErrored` 则会彻底重置调用栈。[^pwor]
+- **进入后续流程**：若无上述异常，则调用 `finishConcurrentRender`。对于普通渲染，它会直接推进到 Commit 提交；而对于挂起的 Transition 或 Retry，它会将 Root 标记为挂起状态，并可能通过 `scheduleTimeout` 调度一个带节流的 `completeRootWhenReady`。[^finish] 此外，`completeRootWhenReady` 甚至可以**挂起提交动作（Suspend the commit）**（例如等待外部样式表、图片加载完毕，或等待活跃的 View Transition 原生视图过渡就绪），之后再调用 `completeRoot` → `commitRoot`。[^ready]
 
-## renderRootSync vs renderRootConcurrent
+## renderRootSync 与 renderRootConcurrent
 
-Both functions have the same skeleton:
+这两个函数拥有完全相同的骨架结构：
 
-1. Set `executionContext |= RenderContext` and push the hooks dispatcher ([[01 Bootstrap - Packages, JSX and the Dispatcher|Bootstrap]]).
-2. **If the root or the lanes changed** since the last time we were here, call `prepareFreshStack`. If not, *continue the existing work-in-progress*.[^rrs-fresh][^rrc-fresh]
-3. Enter an `outer: do { try { ... workLoopX() } catch (thrownValue) { handleThrow(...) } } while (true)` loop.
-4. Restore context. If `workInProgress === null` the tree is done, so clear `workInProgressRoot` and return the exit status. Otherwise return `RootInProgress`.[^rrs][^rrc-end]
+1. 设置执行上下文标记 `executionContext |= RenderContext`，并推入对应的 Hooks 分发器（Dispatcher，参见 [[01 Bootstrap - Packages, JSX and the Dispatcher|01 · 初始化引导：包结构、JSX 与分发器]]）。
+2. **检查当前 Root 或车道（Lanes）是否发生变化**：如果与上一次执行相比发生了变更，则调用 `prepareFreshStack` 搭建全新的栈帧；如果未变，则**无缝延续现有的工作中 Fiber（workInProgress）**。[^rrs-fresh][^rrc-fresh]
+3. 进入外层大循环：`outer: do { try { ... workLoopX() } catch (thrownValue) { handleThrow(...) } } while (true)`。
+4. 恢复上下文环境。若 `workInProgress === null`，说明整棵树的工作已全部完成，此时清空 `workInProgressRoot` 并返回对应的退出状态码；否则返回 `RootInProgress`。[^rrs][^rrc-end]
 
-They differ in how they handle a thrown promise (suspension) and in which inner loop they use:
+两者的核心差异在于如何处理抛出的 Promise（即组件挂起），以及内部运转的具体工作循环：
 
-| | `renderRootSync` | `renderRootConcurrent` |
+| 维度 | `renderRootSync` | `renderRootConcurrent` |
 |---|---|---|
-| Inner loop | `workLoopSync` (never checks time) | `workLoopConcurrentByScheduler` (or `workLoopConcurrent` behind `enableThrottledScheduling`, which is `false` in 19.3.1)[^flags] |
-| Suspended on data | Unwind immediately to the nearest Suspense boundary / fallback (`throwAndUnwindWorkLoop`) | If the thenable already resolved, *replay* the fiber. Otherwise attach `onResolution`, `break outer` (yield), and resume on ping[^rrc-suspend] |
-| Can return mid-tree | Only when it switches to prerendering | Yes, whenever Scheduler says yield |
+| 内部工作循环 | `workLoopSync`（从不检查执行耗时） | `workLoopConcurrentByScheduler`（或受实验性开关 `enableThrottledScheduling` 控制的 `workLoopConcurrent`，在 19.3.1 中默认为 `false`）[^flags] |
+| 因等待数据而挂起 | 立即回溯展开至最近的 Suspense 边界 / Fallback 视图（`throwAndUnwindWorkLoop`） | 若 thenable 已经就绪（Resolved），直接**重新重放（Replay）**当前 Fiber；否则挂载 `onResolution` 监听，`break outer` 让出主线程，并在 ping 通知到达后精准唤醒恢复[^rrc-suspend] |
+| 能否中途中断并返回 | 仅当主动切换为预渲染（Prerendering）时可以 | 随时可以，只要 Scheduler 要求让出控制权即可中途返回 |
 
 ```js
 function workLoopSync() {
@@ -92,14 +92,14 @@ function workLoopConcurrentByScheduler() {
 ```
 [^loops]
 
-`shouldYield` is Scheduler's `shouldYieldToHost`. It returns `true` once about `frameYieldMs = 5`ms have passed since the current Scheduler task started, or right away if `requestPaint()` was called.[^yield] So "time slicing" in practice means checking a clock between **fibers**, never inside a component. A single component that takes 200ms will still block for 200ms.
+这里的 `shouldYield` 实质上是 Scheduler 导出的 `shouldYieldToHost`。当当前 Scheduler 任务已连续执行约 `frameYieldMs = 5`ms 时，或者在页面显式触发了 `requestPaint()` 时，它就会返回 `true`。[^yield] 因此在工程实践中，“时间切片”的本质是在 **Fiber 与 Fiber 之间的交接点**检查系统时钟，而**绝不会在单个组件执行中途中断**。如果单个组件自身的渲染耗时达到了 200ms，那么它依然会毫无保留地卡顿主线程 200ms。
 
-> [!note] The experimental `workLoopConcurrent(nonIdle)` variant
-> Behind `enableThrottledScheduling` there's a loop that yields every 25ms for non-idle work instead of 5ms. The source comment explains that the aim is to deliberately cap animations at ~30fps so they can't starve transition rendering.[^loops] It's off in 19.3.1, but it shows the direction: the yield interval is a scheduling policy React can tune.
+> [!note] 实验性变体：workLoopConcurrent(nonIdle)
+> 在特性开关 `enableThrottledScheduling` 背后，存在一个针对非空闲工作将让出间隔由 5ms 放宽至 25ms 的特殊循环。源码注释指出，这一设计的初衷是刻意将动画帧率限制在约 30fps，避免高频动画将过渡渲染（Transition Rendering）彻底饿死。[^loops] 虽然该功能在 19.3.1 中处于关闭状态，但它清晰地揭示了未来的演进方向：让出间隔实质上是一项 React 可以在运行时动态微调的调度策略。
 
-## prepareFreshStack + createWorkInProgress for the root
+## prepareFreshStack 与根节点的 createWorkInProgress
 
-`prepareFreshStack` is how a render starts over from scratch:
+`prepareFreshStack` 是渲染从零开始（Start over from scratch）的核心步骤：
 
 ```js
 // simplified
@@ -120,17 +120,17 @@ function prepareFreshStack(root, lanes) {
 ```
 [^pfs]
 
-`createWorkInProgress(current, pendingProps)` is the **double-buffering** primitive ([[05 The Fiber Data Structure|Fiber]]):
+`createWorkInProgress(current, pendingProps)` 则是**双缓存（Double Buffering）机制**的基础原语（参见 [[05 The Fiber Data Structure|05 · Fiber 数据结构]]）：
 
-- If `current.alternate === null` (true for the HostRoot on the very first render), it allocates a new fiber and links `wip.alternate = current; current.alternate = wip`.
-- Otherwise it **reuses the alternate object**: it resets `flags` (keeping only `StaticMask`), `subtreeFlags` and `deletions`, and copies `child`, `memoizedProps`, `memoizedState`, `updateQueue`, `lanes`, `childLanes`, `sibling`, `index` and `ref` from `current`.[^cwip]
+- 若 `current.alternate === null`（首次渲染时的 HostRoot 即为此状态），它会分配一个全新的 Fiber 对象，并将二者互相关联：`wip.alternate = current; current.alternate = wip`。
+- 否则，它会**直接复用既有的 alternate 备用对象**：重置其副作用标记 `flags`（仅保留 `StaticMask`）、`subtreeFlags` 与 `deletions`，并从 `current` 身上忠实复制 `child`、`memoizedProps`、`memoizedState`、`updateQueue`、`lanes`、`childLanes`、`sibling`、`index` 以及 `ref` 等属性。[^cwip]
 
-The WIP root starts out with `child = current.child`. In other words it begins by *pointing at the current children*. Children are cloned lazily, only as `beginWork` reaches them, either through reconciliation or through `cloneChildFibers` on a bailout ([[07 beginWork and Reconciliation|beginWork & Reconciliation]]).
+工作中的根节点（WIP Root）初始时其 `child` 会直接赋值为 `current.child`。换句话说，它在起点处是直接**指向现有的子节点**的。子节点并不会一次性全量克隆，而是采取**惰性克隆（Lazy cloning）**：只有当 `beginWork` 在遍历中实际触达它们时，才会通过 Diff 协调，或者在触发跳过机制（Bailout）时经由 `cloneChildFibers` 进行克隆（参见 [[07 beginWork and Reconciliation|07 · beginWork 与协调]]）。
 
-> [!tip] Why reuse the alternate?
-> After the first update every fiber has exactly two objects, current and alternate, which swap roles on each commit. Reusing them avoids allocating a whole new tree per render. It also explains why the render phase must be pure: the "new" fiber you write into is an object that was *previously committed*, so any half-written state is garbage until commit makes it current.
+> [!tip] 为什么要复用 alternate 对象？
+> 经过首次更新后，树中的每个节点在内存中都恰好对应且仅对应两个对象：`current` 与 `alternate`。每当一次提交完成，二者的角色便互换一次。通过持续复用这两个对象，React 避免了每次渲染都要重新在堆内存中开辟一整棵新树的巨大内存分配与垃圾回收开销。这也深刻解释了为什么 Render 阶段必须保持纯粹（Pure）：你正在写入属性的这个“全新”工作中 Fiber，本质上是一个**在上一次提交中曾被视作稳定视图的对象**；在本次渲染通过 Commit 阶段将其正式扶正为 `current` 之前，你写入的任何半成品状态在逻辑上都如同未生效的草稿。
 
-The `(workInProgressRoot !== root || workInProgressRootRenderLanes !== lanes)` check is what makes **interruption** work. If a transition render yields and a click arrives, the next `performWorkOnRoot` call gets `SyncLane`. The lanes differ, so `prepareFreshStack` runs `resetWorkInProgressStack()` (which calls `unwindInterruptedWork` up the return path to pop contexts) and starts a new WIP from `root.current`.[^reset] The half-built transition tree is simply discarded. The transition's updates are still in the queues (they were never removed, see [[11 Hooks on Update|Hooks on Update]]), so it is re-rendered from scratch later on top of the new state.
+`(workInProgressRoot !== root || workInProgressRootRenderLanes !== lanes)` 的判定条件正是让**渲染打断（Interruption）**得以运作的秘密。如果一个过渡渲染（Transition Render）在时间切片中让出了控制权，此时用户点击产生了一个高优先级的同步交互，下一次 `performWorkOnRoot` 就会拿到 `SyncLane`。由于车道不匹配，`prepareFreshStack` 会坚决执行 `resetWorkInProgressStack()`（沿 `return` 链向上调用 `unwindInterruptedWork` 弹出各类上下文栈），并从 `root.current` 重新开始构建全新的 WIP 树。[^reset] 刚才只建了一半的过渡渲染树被干脆利落地直接丢弃。而该过渡任务对应的更新对象依然完好无损地保存在各个 Fiber 的更新队列中（从未被弹出移除，参见 [[11 Hooks on Update|11 · Hooks 更新阶段]]），因此后续它会在更高优先级更新带来的全新状态基底上，从容地从头重算并渲染。
 
 ## performUnitOfWork → beginWork / completeUnitOfWork
 
@@ -148,12 +148,12 @@ function performUnitOfWork(unitOfWork) {
 ```
 [^puow]
 
-Notes:
-- **`current` is the mount/update switch for the whole render phase.** `current === null` means "this fiber has never been committed", and every `beginWork`/`completeWork` branch tests it. On the first render the HostRoot *does* have a current (created by `createRoot`, see [[02 createRoot - FiberRoot and HostRoot|createRoot]]), but every fiber below it is brand new, so `current === null` all the way down. That is why the first render is a "mount" everywhere except at the root. Page 07 explains why this means only the root's direct child gets a `Placement` flag.
-- `memoizedProps = pendingProps` happens right after `beginWork`. Next render, `current.memoizedProps` is what `beginWork` compares by **identity** against the new `pendingProps` to decide on a bailout.
-- `beginWork` returns the **first child** to work on next, or `null`.
+深度解析核心要点：
+- **`current` 是贯穿整个 Render 阶段的“挂载（Mount）/ 更新（Update）”总开关。** `current === null` 意味着“该 Fiber 从未被提交到屏幕上”，`beginWork` 和 `completeWork` 中的所有分支逻辑几乎都会判断它。在首屏渲染时，`HostRoot` **确实**存在一个 `current`（由 `createRoot` 创建，参见 [[02 createRoot - FiberRoot and HostRoot|02 · createRoot：FiberRoot 与 HostRoot]]），但其下方的所有子孙 Fiber 都是初次分配的，因此整棵树自上而下都是 `current === null`。这就是为什么除了根节点之外，首次渲染在所有节点上都被视作“挂载（Mount）”。第 07 篇将进一步剖析为什么在这一机制下，只有根节点的直接子节点会被打上 `Placement` 插入标记。
+- `memoizedProps = pendingProps` 在 `beginWork` 执行完毕后立即赋值。到了下一次渲染时，`beginWork` 就会通过严格引用比对（Identity Comparison）将 `current.memoizedProps` 与新的 `pendingProps` 进行对比，以此作为跳过机制（Bailout）的重要判定依据。
+- `beginWork` 会返回接下来要处理的**第一个子节点（First Child）**；若已无子节点，则返回 `null`。
 
-`completeUnitOfWork` is the "climb back up" half:
+`completeUnitOfWork` 则负责“自底向上回溯”的后半程：
 
 ```js
 function completeUnitOfWork(unitOfWork) {
@@ -177,9 +177,9 @@ function completeUnitOfWork(unitOfWork) {
 ```
 [^cuow]
 
-So the traversal is an **iterative depth-first walk** that uses three pointers per fiber (`child`, `sibling`, `return`) instead of the JS call stack. React used to recurse (the pre-Fiber "stack reconciler"). This design is what makes yielding possible: the entire "stack" is a single variable, `workInProgress`, and you can stop after any fiber and come back later.
+因此，整棵树的遍历过程是一个**基于迭代的深度优先遍历（Iterative Depth-First Walk）**：它依靠每个 Fiber 上的三个指针（`child`、`sibling`、`return`）取代了 JavaScript 原生调用栈。在 Fiber 架构诞生之前，React 采用的是递归模式（即 React 16 之前的“Stack 栈协调器”）。而这一三指针链表设计，正是使渲染中途“让出与暂停”成为可能的关键所在：整个执行“调用栈”被具象化为一个纯粹的堆变量 `workInProgress`，引擎可以在处理完任意一个 Fiber 后随时戛然而止，并在后续安全地重返现场继续执行。
 
-## Depth-first traversal on a small tree
+## 小型组件树的深度优先遍历全解
 
 ```jsx
 function App() {
@@ -204,73 +204,73 @@ flowchart TD
   LA -. sibling .-> LB[li 'b']
 ```
 
-Order of calls (B = beginWork, C = completeWork):
+函数调用顺序详解（B 代表 `beginWork`，C 代表 `completeWork`）：
 
-| # | Call | Why |
+| 序号 | 调用链路 | 底层原因 |
 |---|---|---|
-| 1 | B(HostRoot) | processes the update queue → `{element: <App/>}` |
-| 2 | B(App) | runs `App()` via `renderWithHooks` |
-| 3 | B(div) | reconciles `[h1, List]` |
-| 4 | B(h1) | text child `"Hi"` is set via `textContent`, no fiber → returns `null` |
-| 5 | **C(h1)** | creates `<h1>` DOM node. Has sibling → go to List |
-| 6 | B(List) | runs `List()` |
-| 7 | B(ul) | reconciles `[li, li]` |
-| 8 | B(li a) → **C(li a)** | leaf. sibling → li b |
-| 9 | B(li b) → **C(li b)** | no sibling → return to ul |
-| 10 | **C(ul)** | creates `<ul>`, appends both `<li>` |
-| 11 | **C(List)** | no sibling → return |
-| 12 | **C(div)** | creates `<div>`, appends `<h1>` and `<ul>` |
-| 13 | **C(App)**, **C(HostRoot)** | bubbling only; `workInProgress = null` → `RootCompleted` |
+| 1 | B(HostRoot) | 处理更新队列（Update Queue）→ 生成 `{element: <App/>}` |
+| 2 | B(App) | 通过 `renderWithHooks` 执行组件函数 `App()` |
+| 3 | B(div) | 协调子节点列表 `[h1, List]` |
+| 4 | B(h1) | 纯文本子节点 `"Hi"` 通过 `textContent` 直接设置，不生成独立 Fiber → 返回 `null` |
+| 5 | **C(h1)** | 创建 `<h1>` 真实 DOM 节点；存在兄弟节点 → 转向 List |
+| 6 | B(List) | 执行组件函数 `List()` |
+| 7 | B(ul) | 协调子节点列表 `[li, li]` |
+| 8 | B(li a) → **C(li a)** | 到达叶子节点；转向兄弟节点 li b |
+| 9 | B(li b) → **C(li b)** | 无兄弟节点 → 沿 `return` 指针回溯至 ul |
+| 10 | **C(ul)** | 创建 `<ul>` 真实 DOM 节点，并将两个 `<li>` 挂载追加到其中 |
+| 11 | **C(List)** | 无兄弟节点 → 向上回溯至父节点 |
+| 12 | **C(div)** | 创建 `<div>` 真实 DOM 节点，并将 `<h1>` 与 `<ul>` 挂载追加到其中 |
+| 13 | **C(App)**, **C(HostRoot)** | 仅冒泡副作用标记；当 `workInProgress = null` 时状态标记为 `RootCompleted` |
 
-Every parent completes after all its children, which is why the DOM can be built bottom-up off-screen ([[08 completeWork - Building DOM Nodes|completeWork]]).
+每个父节点必然在其所有子节点都彻底完成（Complete）之后才执行自身的完成逻辑，这也正是真实 DOM 能够在内存中自底向上（Bottom-up）、离屏组装拼接的根本原因（参见 [[08 completeWork - Building DOM Nodes|08 · completeWork：构建真实 DOM 节点]]）。
 
-## First render vs update, in the loop
+## 工作循环中：首次渲染 vs 更新渲染
 
-| | First render (mount) | Update (e.g. setState in `List`) |
+| 维度 | 首次渲染（Mount 挂载） | 更新渲染（例如在 `List` 中触发 setState） |
 |---|---|---|
-| HostRoot WIP | `createWorkInProgress` allocates the alternate | reuses the alternate |
-| Fibers below root | all new (`current === null`) | mostly cloned; untouched subtrees skipped |
-| Fibers visited | every fiber | only the path root → `List` plus `List`'s subtree. `App`, `div` and `h1` bail out because their `lanes` don't include the render lane, and `childLanes` tells React where to descend[^bail] |
-| `completeWork` on hosts | creates DOM nodes | marks `Update` if props object changed |
+| HostRoot WIP | 由 `createWorkInProgress` 全新分配一个 alternate 备用对象 | 直接复用既有的 alternate 备用对象 |
+| 根节点以下的 Fiber | 全部全新创建（`current === null`） | 大部分继承克隆；未受影响的子树直接跳过 |
+| 实际访问遍历的 Fiber | 每一个 Fiber 节点逐一遍历 | 仅遍历 root → `List` 这条祖先路径以及 `List` 本身的子树。`App`、`div` 与 `h1` 会直接触发 Bailout 跳过，因为它们的 `lanes` 并不包含本次渲染车道，而父级上的 `childLanes` 会精确指引 React 应当向哪个子分支深入[^bail] |
+| 宿主组件上的 `completeWork` | 在内存中创建真实 DOM 节点 | 若 props 对象发生变更，则打上 `Update` 副作用标记 |
 
-The update case is the big performance property: a `setState` deep in the tree does *not* re-render from the root. `beginWork` runs on the ancestors, sees they have no work of their own (`checkScheduledUpdateOrContext` is false), and `bailoutOnAlreadyFinishedWork` just clones the child pointers down the `childLanes` trail. Details are in [[07 beginWork and Reconciliation|beginWork & Reconciliation]].
+更新场景体现了 React 最关键的性能特性：在树的深层触发一次 `setState`，**绝不会**自根节点向下对所有组件进行无差别重渲染。`beginWork` 沿途访问祖先节点时，会发现它们自身没有任何待处理的工作（`checkScheduledUpdateOrContext` 返回 false），此时 `bailoutOnAlreadyFinishedWork` 会顺着 `childLanes` 开辟的轨迹直接克隆子节点指针并快速下潜。详细实现机制请参见 [[07 beginWork and Reconciliation|07 · beginWork 与协调]]。
 
-## Interruption, resumption and suspension (brief)
+## 渲染的中断、恢复与挂起机制（概览）
 
-- **Yield**: `workLoopConcurrentByScheduler` exits with `workInProgress !== null` → `renderRootConcurrent` returns `RootInProgress` → the Scheduler task returns a continuation. On the next task, `workInProgressRoot === root && lanes` match, so there is **no** `prepareFreshStack` and the loop simply resumes at `workInProgress`.[^rrc-fresh]
-- **Interrupt**: higher-priority lanes arrive → lanes mismatch → `prepareFreshStack` → the old WIP is thrown away (see above).
-- **Suspend**: a component calls `use(promise)` or throws a promise. That surfaces as a throw out of `beginWork`, caught by the `try/catch` in the render function and handed to `handleThrow`, which records a `workInProgressSuspendedReason` (e.g. `SuspendedOnImmediate` / `SuspendedOnData`).[^throw] In a concurrent render, React can *wait* for the promise without unwinding (`thenable.then(onResolution, onResolution); break outer`) and later **replay only that one fiber** (`replaySuspendedUnitOfWork`) instead of re-rendering the subtree.[^rrc-suspend] In a sync render it unwinds immediately to the nearest Suspense boundary, which shows its fallback.
+- **让出（Yield）**：`workLoopConcurrentByScheduler` 退出时仍有剩余工作（`workInProgress !== null`）→ `renderRootConcurrent` 返回退出状态码 `RootInProgress` → 当前 Scheduler 任务返回自身作为延续函数。在下一个宏任务调度中，由于 `workInProgressRoot === root` 且车道集完全一致，因此**无需**调用 `prepareFreshStack`，工作循环直接从上次中断的 `workInProgress` 指针处无缝继续推进。[^rrc-fresh]
+- **打断（Interrupt）**：更高优先级的车道中途插入 → 车道不一致 → 触发 `prepareFreshStack` → 先前半途而废的 WIP 树被整体抛弃（如前文所述）。
+- **挂起（Suspend）**：组件内部调用了 `use(promise)` 或直接抛出了一个 Promise。该行为会表现为从 `beginWork` 中向外抛出异常，被渲染执行函数内部的 `try/catch` 捕获并移交给 `handleThrow`，记录挂起原因 `workInProgressSuspendedReason`（例如 `SuspendedOnImmediate` 或 `SuspendedOnData`）。[^throw] 在并发渲染中，React 可以做到**原地等待** Promise 兑现，而无需立即展开回溯调用栈（通过 `thenable.then(onResolution, onResolution); break outer`），并在后续**仅精准重放（Replay）这单个 Fiber**（调用 `replaySuspendedUnitOfWork`），无须将整个子树全部推倒重来。[^rrc-suspend] 而在同步渲染中，它会立即展开回溯至最近的 Suspense 边界，并展示 Fallback 占位视图。
 
-> [!warning] The render phase may run more than once and may never commit
-> Between interruption, the store-tearing re-render, error retry, suspense replays and StrictMode double-rendering, the component functions for one visible update can run several times, and a render can end up discarded entirely. That's why render must be pure: no subscriptions, no mutation of external objects, no DOM reads. Anything that must happen exactly once per *committed* result goes in an effect ([[09 Commit Phase - Mutation, Layout, Passive Effects|Commit Phase]]).
+> [!warning] Render 阶段可能会被反复执行多次，且甚至可能永远不会提交
+> 综合考虑高优先级任务打断、外部 Store 撕裂导致的同步重算、错误捕获后的重试、Suspense 局部重放以及严格模式（StrictMode）的双重渲染，在用户肉眼看到一次屏幕更新之前，组件函数完全有可能被调用执行许多次，甚至整个渲染树可能会被中途彻底抛弃。这也正是为什么 Render 阶段必须严格保持纯粹（Pure）：严禁产生任何副作用订阅、严禁直接修改外部对象引用、严禁读取真实 DOM 布局信息。任何对于每次**真实提交生效**的结果必须且仅能执行一次的逻辑，都必须统一放置在 Effect 副作用中（参见 [[09 Commit Phase - Mutation, Layout, Passive Effects|09 · Commit 阶段：Mutation、Layout 与被动副作用]]）。
 
-## Finishing → commit
+## 渲染收尾与迈向 Commit 提交
 
-When `completeUnitOfWork` climbs past the HostRoot, `workInProgress` becomes `null` and the exit status becomes `RootCompleted`. `performWorkOnRoot` reads `finishedWork = root.current.alternate`, which is the finished WIP root. It calls `finishConcurrentRender` → `completeRootWhenReady` → `completeRoot` → `commitRoot`.[^pwor][^finish][^ready] Despite its name, `finishConcurrentRender` is called for sync renders too.
+当 `completeUnitOfWork` 最终向上回溯跨越过 `HostRoot` 时，`workInProgress` 指针正式变更为 `null`，退出状态被置为 `RootCompleted`。`performWorkOnRoot` 读取 `finishedWork = root.current.alternate`，这便是已经彻底构建完成的 WIP 根节点。接着它沿着链路调用 `finishConcurrentRender` → `completeRootWhenReady` → `completeRoot` → `commitRoot`。[^pwor][^finish][^ready] 顺便一提，尽管该函数名为 `finishConcurrentRender`（完成并发渲染），但同步渲染也同样是由它统一收口处理的。
 
-At this point the WIP tree is complete. It has DOM nodes for new host fibers, `flags` on every fiber that needs a side effect, and `subtreeFlags` bubbled up so the commit can skip clean subtrees. Nothing has been inserted into the document yet. That happens in [[09 Commit Phase - Mutation, Layout, Passive Effects|Commit Phase]].
+此时此刻，这棵正在构建中的 WIP 树已经万事俱备：所有新增的宿主 Fiber 都已在内存中生成好了真实的 DOM 节点，每个需要执行副作用的 Fiber 上都被打上了精确的 `flags` 标记，并且所有标记都通过 `subtreeFlags` 向上冒泡汇总完毕，以便 Commit 阶段能够极速跳过那些“洁净无暇”的子树。但请牢记：**此时整棵新树还没有向真实 DOM 文档中插入任何一个节点**。所有真实界面的生根落地，都将完整发生在 [[09 Commit Phase - Mutation, Layout, Passive Effects|09 · Commit 阶段：Mutation、Layout 与被动副作用]] 中。
 
-## With the React Compiler
+## 与 React 编译器的协同配合
 
-The work loop is **unchanged**. The compiler rewrites your component bodies and never touches `react-reconciler` ([[14 React Compiler - How It Works|React Compiler]]). What changes is *how many fibers the loop actually processes*. Compiled components return cached JSX elements when their inputs haven't changed. As described on page 07, `beginWork` then sees `oldProps === newProps` for the children and bails out of whole subtrees, so in step "Fibers visited" above, the subtree under an updated component often shrinks to just the parts whose inputs really changed. Fewer `performUnitOfWork` calls means less render time and fewer yields. See [[15 Rendering With vs Without the Compiler|With vs Without Compiler]].
+在 React 编译器介入后，核心的工作循环机制**完全保持不变**。编译器仅仅改写你的组件函数体内部代码，完全不会改动 `react-reconciler` 的任何底层逻辑（参见 [[14 React Compiler - How It Works|14 · 编译器工作原理]]）。它所深刻改变的，是**工作循环在实际运行时到底需要遍历处理多少个 Fiber**。经由编译器转译后的组件，当输入 props 和依赖未变时，会直接返回带缓存的既有 JSX 元素引用。正如第 07 篇中所详述，当 `beginWork` 看到子节点的 `oldProps === newProps` 引用全等时，便能直接触发整棵子树的 Bailout 跳过机制。因此在前文“访问遍历的 Fiber”这一环节中，更新组件下方的整棵子树往往会被极速裁减，仅留下输入真正发生改变的极少数节点。`performUnitOfWork` 调用次数的大幅减少，直接带来了渲染执行总耗时的下降以及向主线程让出次数的锐减。详情参见 [[15 Rendering With vs Without the Compiler|15 · 启用与未启用编译器的对比]]。
 
-## Summary
+## 总结
 
-The render phase is a `while` loop over one global pointer, `workInProgress`. `performWorkOnRoot` decides whether to time-slice, `prepareFreshStack` clones the HostRoot into a work-in-progress fiber, and `performUnitOfWork` walks the tree depth-first: `beginWork` going down, `completeWork` coming back up. Because the whole "stack" is one variable and nothing touches the screen, React can yield, resume, or discard a half-built tree. Render can run several times and never commit, so it must be pure. Next: [[07 beginWork and Reconciliation|beginWork]].
+Render 阶段本质上是围绕一个全局单一指针 `workInProgress` 旋转的 `while` 循环。`performWorkOnRoot` 决定本次渲染是否开启时间切片，`prepareFreshStack` 将 `HostRoot` 克隆为最初的工作中 Fiber，而 `performUnitOfWork` 则以深度优先遍历的方式巡检整棵树：下潜时执行 `beginWork`，回溯上浮时执行 `completeWork`。正是因为整棵执行栈都被浓缩在单个变量之中，且期间完全不直接操作真实 DOM，React 才能自如地暂停让出、从容恢复、乃至直接丢弃构建了一半的草稿树。Render 阶段完全可能被调用多次却最终并不提交，因此代码必须绝对保持纯粹（Pure）。下一篇：[[07 beginWork and Reconciliation|07 · beginWork 与协调]]。
 
-### Key takeaways
+### 核心要点回顾
 
-- **`shouldTimeSlice`**: `DefaultLane` is blocking, so the initial mount runs in `renderRootSync`; only Transition, Retry, Idle and Offscreen lanes yield.
-- **Exit handling**: `performWorkOnRoot` handles yields, re-renders synchronously if a concurrent render saw a store change (tearing), retries errors once, or calls `finishConcurrentRender`.
-- **`workLoopSync` vs `workLoopConcurrentByScheduler`**: the concurrent loop checks `shouldYield()` between fibers, never inside a component.
-- **`prepareFreshStack`**: resets render state, creates the root WIP and drains interleaved updates onto fibers.
-- **Interruption**: when the root or lanes change, the old WIP is discarded; its updates are still in the queues.
-- **`performUnitOfWork`**: `current === null` is the mount/update switch, and `memoizedProps = pendingProps` sets up the next bailout check.
-- **`completeUnitOfWork`**: completes a fiber, then moves to its sibling or parent, so parents complete after their children.
-- **Updates skip work**: `childLanes` limits a deep `setState` to the path to the updated fiber plus its subtree.
-- **Suspension**: a concurrent render can wait and replay one fiber; a sync render unwinds to the nearest Suspense boundary.
+- **`shouldTimeSlice` 判定**：`DefaultLane` 被归为阻塞性车道，因此组件的初次挂载必然运行在 `renderRootSync` 中；只有 Transition（过渡）、Retry（重试）、Idle（空闲）和 Offscreen 车道才会真正向浏览器让出控制权。
+- **退出状态处理**：`performWorkOnRoot` 负责统一调度主线程让出、在检测到外部 Store 发生篡改（数据撕裂）时退回至同步重渲、对报错提供一次同步重试机会，或者最终交由 `finishConcurrentRender` 收口。
+- **`workLoopSync` vs `workLoopConcurrentByScheduler`**：并发循环在 **Fiber 与 Fiber 之间的切换空隙**调用 `shouldYield()` 判定是否让出，而绝不会在单个组件执行中途强行打断。
+- **`prepareFreshStack` 重置栈帧**：清空上一轮渲染的残留状态，构建根节点的 WIP 对象，并将插队进来的并发更新批量分配至各个 Fiber。
+- **渲染打断机制**：当 Root 或渲染车道发生变更时，旧的半成品 WIP 树将被直接丢弃；其未消化的更新依然安全保留在更新队列中等待重算。
+- **`performUnitOfWork` 执行单元**：`current === null` 充当了全流程的“挂载/更新”状态开关，并在子节点深入前令 `memoizedProps = pendingProps` 为下一次渲染的 Bailout 跳过判定做好准备。
+- **`completeUnitOfWork` 回溯机制**：完成当前节点的工作，随后转向其兄弟节点或回溯至父节点，确保所有父节点的完成逻辑必然落后于子节点。
+- **更新跳过冗余工作**：深层节点发起的 `setState` 借助祖先链路上的 `childLanes` 标记，将渲染范围严格限定在通往该节点的路径与其自身子树中，大面积跳过无关分支。
+- **组件挂起处理**：并发渲染具备“原地暂停等待并仅重新重放单个 Fiber”的能力；而同步渲染则会立即展开回溯至最近的 Suspense 边界展示 Fallback。
 
-← [[05 The Fiber Data Structure|Fiber]] · [[00 React Internals Index|Index]] · [[07 beginWork and Reconciliation|beginWork & Reconciliation]] →
+← [[05 The Fiber Data Structure|05 · Fiber 数据结构]] · [[00 React Internals Index|目录导航]] · [[07 beginWork and Reconciliation|07 · beginWork 与协调]] →
 
 [^sched-sync]: `scheduleTaskForRootDuringMicrotask` sync branch — [packages/react-reconciler/src/ReactFiberRootScheduler.js#L442-L456](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberRootScheduler.js#L442-L456)
 [^perf-sync]: `performSyncWorkOnRoot` — [packages/react-reconciler/src/ReactFiberRootScheduler.js#L608-L622](https://github.com/facebook/react/blob/v19.3.1/packages/react-reconciler/src/ReactFiberRootScheduler.js#L608-L622)
