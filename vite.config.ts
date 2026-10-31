@@ -14,8 +14,10 @@ const generated = [
   "public/attachments/**",
 ];
 
+const base = process.env.BASE_URL || "/";
+
 export default defineConfig({
-  base: process.env.BASE_URL || "/",
+  base,
   server: { port: 3000 },
   resolve: { tsconfigPaths: true },
   plugins: [
@@ -25,7 +27,17 @@ export default defineConfig({
     tanstackStart(),
     // Deploy target comes from NITRO_PRESET (default: node-server). Never hard-code `preset` here:
     // an explicit preset would override the env var. Nitro breaks Vitest (CJS react, shiki wasm), so skip it there.
-    ...(process.env.VITEST ? [] : [nitro()]),
+    ...(process.env.VITEST
+      ? []
+      : [
+          nitro({
+            baseURL: base,
+            prerender: {
+              crawlLinks: true,
+              routes: [base],
+            },
+          }),
+        ]),
     viteReact({ include: /\.(mdx|md|js|jsx|ts|tsx)$/ }),
   ],
   staged: {

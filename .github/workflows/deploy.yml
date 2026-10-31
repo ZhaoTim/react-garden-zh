@@ -41,7 +41,9 @@ jobs:
       - name: Build static site with Nitro
         env:
           BASE_URL: "/react-garden-zh/"
-        run: NITRO_PRESET=github_pages pnpm build
+        run: |
+          NITRO_PRESET=github_pages pnpm build
+          cp .output/public/index.html .output/public/404.html
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
