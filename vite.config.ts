@@ -15,6 +15,7 @@ const generated = [
 ];
 
 export default defineConfig({
+  base: process.env.BASE_URL || "/",
   server: { port: 3000 },
   resolve: { tsconfigPaths: true },
   plugins: [

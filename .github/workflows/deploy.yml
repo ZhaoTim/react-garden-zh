@@ -39,6 +39,8 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build static site with Nitro
+        env:
+          BASE_URL: "/react-garden-zh/"
         run: NITRO_PRESET=github_pages pnpm build
 
       - name: Setup Pages
